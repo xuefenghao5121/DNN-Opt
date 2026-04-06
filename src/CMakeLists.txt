@@ -2,6 +2,10 @@ add_library(dnnopt_core STATIC
     hwcaps/arm_hwcaps.cpp
     utils/timer.cpp
     utils/aligned_alloc.cpp
+    gemm/gemm.cpp
+    gemm/gemm_driver_fp32.cpp
+    gemm/gemm_pack_fp32.cpp
+    gemm/gemm_ukernel_fp32_neon.cpp
 )
 
 target_include_directories(dnnopt_core PUBLIC

@@ -3,6 +3,7 @@
 /// Compares optimized implementations against naive reference.
 
 #include "dnnopt/aligned_alloc.h"
+#include "dnnopt/gemm/gemm.h"
 #include "test_utils.h"
 
 #include <cmath>
@@ -104,6 +105,19 @@ void test_gemm_shape(int M, int N, int K, const char* label) {
         TEST_ASSERT(md < tol, msg);
     }
 #endif
+
+    // Test library GEMM (blocked BLIS driver)
+    {
+        auto C_lib = dnnopt::aligned_array<float>(c_sz);
+        memset(C_lib.get(), 0, c_sz * sizeof(float));
+        dnnopt::gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_lib.get(), N);
+        float md = max_diff(C_ref.get(), C_lib.get(), c_sz);
+
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Blocked GEMM %s [%dx%dx%d] max_diff=%.6e tol=%.6e",
+                 label, M, N, K, md, tol);
+        TEST_ASSERT(md < tol, msg);
+    }
 }
 
 }  // namespace
@@ -136,6 +150,48 @@ int main() {
     test_gemm_shape(5, 7, 11, "5x7x11");
     test_gemm_shape(13, 17, 19, "13x17x19");
     test_gemm_shape(127, 127, 127, "127x127x127");
+
+    // Test alpha/beta scaling with library GEMM
+    printf("\n--- Alpha/Beta tests ---\n");
+    {
+        int M = 32, N = 48, K = 64;
+        size_t a_sz = (size_t)M * K, b_sz = (size_t)K * N, c_sz = (size_t)M * N;
+        auto A = dnnopt::aligned_array<float>(a_sz);
+        auto B = dnnopt::aligned_array<float>(b_sz);
+        auto C_ref = dnnopt::aligned_array<float>(c_sz);
+        auto C_lib = dnnopt::aligned_array<float>(c_sz);
+        fill_random(A.get(), a_sz, 42);
+        fill_random(B.get(), b_sz, 43);
+
+        // Test alpha=2.0, beta=0.0
+        {
+            gemm_ref(M, N, K, A.get(), B.get(), C_ref.get());
+            for (size_t i = 0; i < c_sz; ++i) C_ref.get()[i] *= 2.0f;
+            memset(C_lib.get(), 0, c_sz * sizeof(float));
+            dnnopt::gemm_fp32(M, N, K, 2.0f, A.get(), K, B.get(), N, 0.0f, C_lib.get(), N);
+            float md = max_diff(C_ref.get(), C_lib.get(), c_sz);
+            float tol = K * 4e-5f;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "alpha=2.0 beta=0.0 max_diff=%.6e tol=%.6e", md, tol);
+            TEST_ASSERT(md < tol, msg);
+        }
+        // Test alpha=1.0, beta=0.5
+        {
+            fill_random(C_ref.get(), c_sz, 44);
+            memcpy(C_lib.get(), C_ref.get(), c_sz * sizeof(float));
+            // Compute reference: C = 1.0 * A*B + 0.5 * C
+            auto tmp = dnnopt::aligned_array<float>(c_sz);
+            gemm_ref(M, N, K, A.get(), B.get(), tmp.get());
+            for (size_t i = 0; i < c_sz; ++i)
+                C_ref.get()[i] = tmp.get()[i] + 0.5f * C_ref.get()[i];
+            dnnopt::gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.5f, C_lib.get(), N);
+            float md = max_diff(C_ref.get(), C_lib.get(), c_sz);
+            float tol = K * 4e-5f;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "alpha=1.0 beta=0.5 max_diff=%.6e tol=%.6e", md, tol);
+            TEST_ASSERT(md < tol, msg);
+        }
+    }
 
     TEST_SUMMARY();
 }

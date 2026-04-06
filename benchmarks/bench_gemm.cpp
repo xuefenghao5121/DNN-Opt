@@ -4,6 +4,7 @@
 
 #include "dnnopt/aligned_alloc.h"
 #include "dnnopt/arm_hwcaps.h"
+#include "dnnopt/gemm/gemm.h"
 #include "dnnopt/timer.h"
 
 #include <cmath>
@@ -205,6 +206,23 @@ int main(int argc, char** argv) {
                 gemm_neon_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
             });
             dnnopt::print_bench_stats(stats);
+            all_results.push_back(stats);
+        }
+
+        // Blocked GEMM (8x12 microkernel + BLIS cache blocking)
+        {
+            char name[128];
+            snprintf(name, sizeof(name), "%s [%dx%dx%d] blocked", shape.label, M, N, K);
+            auto stats = dnnopt::benchmark(name, flops, bytes, warmup, runs, [&]() {
+                memset(C.get(), 0, c_size * sizeof(float));
+                dnnopt::gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+            });
+            dnnopt::print_bench_stats(stats);
+            double peak = hw.fp32_gflops_per_core;
+            if (peak > 0) {
+                printf("  >> %.1f%% of FP32 peak (%.2f GFLOPS)\n",
+                       100.0 * stats.gflops / peak, peak);
+            }
             all_results.push_back(stats);
         }
 #endif
