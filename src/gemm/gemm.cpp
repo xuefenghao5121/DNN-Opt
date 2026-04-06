@@ -13,6 +13,12 @@ void gemm_driver_fp32(int M, int N, int K,
                       const float* B, int ldb,
                       float beta, float* C, int ldc);
 
+// Small-M driver (defined in gemm_smallm_fp32.cpp)
+void gemm_smallm_driver_fp32(int M, int N, int K,
+                              float alpha, const float* A, int lda,
+                              const float* B, int ldb,
+                              float beta, float* C, int ldc);
+
 namespace {
 
 /// Naive FP32 GEMM: C = alpha * A * B + beta * C
@@ -54,7 +60,10 @@ void gemm_fp32(int M, int N, int K,
     // Auto or explicit NEON
 #ifdef __ARM_NEON
     if (algo == GemmAlgo::kAuto || algo == GemmAlgo::kNeonFp32) {
-        gemm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        if (M < kGemmMrFp32)
+            gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        else
+            gemm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
 #endif

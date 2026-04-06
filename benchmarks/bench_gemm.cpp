@@ -145,6 +145,11 @@ const GemmShape gemm_shapes[] = {
     // ResNet FC layer
     {1,   1000, 2048,  "ResNet-FC"},
 
+    // Small-M shapes (batch-1 inference, GEMV-like)
+    {2,   1000, 2048,  "SmallM-2"},
+    {4,   1000, 2048,  "SmallM-4"},
+    {7,   1000, 2048,  "SmallM-7"},
+
     // GPT-2 shapes (seq=1024, hidden=768)
     {1024, 768,  768,  "GPT2-QKV"},
     {1024, 3072, 768,  "GPT2-FFN1"},
