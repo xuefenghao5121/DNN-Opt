@@ -2,6 +2,7 @@ add_library(dnnopt_core STATIC
     hwcaps/arm_hwcaps.cpp
     utils/timer.cpp
     utils/aligned_alloc.cpp
+    cpu_tuning_profiles.cpp
     gemm/gemm.cpp
     gemm/gemm_ukernel_registry.cpp
     gemm/gemm_driver_generic.cpp
@@ -16,6 +17,7 @@ add_library(dnnopt_core STATIC
     gemm/gemm_pack_int8.cpp
     gemm/gemm_ukernel_int8_neon.cpp
     gemm/gemm_driver_int8.cpp
+    gemm/gemm_autotune.cpp
 )
 
 target_include_directories(dnnopt_core PUBLIC

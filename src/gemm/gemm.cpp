@@ -6,7 +6,9 @@
 #include "dnnopt/gemm/gemm_config.h"
 #include "dnnopt/gemm/gemm_ukernel_registry.h"
 #include "dnnopt/gemm/gemm_driver_generic.h"
+#include "dnnopt/gemm/gemm_autotune.h"
 #include "dnnopt/arm_hwcaps.h"
+#include "dnnopt/cpu_tuning_profile.h"
 
 namespace dnnopt {
 
@@ -53,6 +55,7 @@ bool dispatch_via_registry(GemmDataType dtype,
                            const float* B, int ldb,
                            float beta, float* C, int ldc) {
     const auto& hw = detect_arm_hwcaps();
+    const auto& profile = get_autotuned_profile();
     const auto* desc = GemmUkernelRegistry::instance().select(dtype, hw);
     if (!desc) return false;
 
@@ -62,7 +65,7 @@ bool dispatch_via_registry(GemmDataType dtype,
     // Small-M: fall back to FP32 small-M driver (no packing overhead justified)
     if (M < Mr) return false;
 
-    auto bp = compute_blocking_params(hw, Mr, Nr, desc->Kgroup,
+    auto bp = compute_blocking_params(hw, profile, Mr, Nr, desc->Kgroup,
                                       desc->packed_a_elem_bytes,
                                       desc->packed_b_elem_bytes,
                                       M, N, K);
