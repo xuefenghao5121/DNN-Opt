@@ -132,6 +132,23 @@ void test_gemm_shape(int M, int N, int K, const char* label) {
                  label, M, N, K, md, bf16_tol);
         TEST_ASSERT(md < bf16_tol, msg);
     }
+
+    // Test INT8 GEMM (SMMLA path, relaxed tolerance for INT8 quantization)
+    {
+        auto C_int8 = dnnopt::aligned_array<float>(c_sz);
+        memset(C_int8.get(), 0, c_sz * sizeof(float));
+        dnnopt::gemm_int8(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_int8.get(), N);
+        float md = max_diff(C_ref.get(), C_int8.get(), c_sz);
+        // INT8 quantization error: ~1/127 per element, accumulated over K
+        // With random [-1,1] inputs, expected error ~ K * (1/127) * sqrt(K) / K ~ sqrt(K)/127
+        // Use generous tolerance to account for worst-case
+        float int8_tol = K * 2e-2f;
+
+        char msg[128];
+        snprintf(msg, sizeof(msg), "INT8 GEMM %s [%dx%dx%d] max_diff=%.6e tol=%.6e",
+                 label, M, N, K, md, int8_tol);
+        TEST_ASSERT(md < int8_tol, msg);
+    }
 }
 
 }  // namespace

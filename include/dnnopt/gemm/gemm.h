@@ -30,4 +30,12 @@ void gemm_bf16(int M, int N, int K,
                const float* B, int ldb,
                float beta, float* C, int ldc);
 
+/// INT8 GEMM: input/output FP32, internal compute INT8 via SMMLA.
+/// Uses symmetric per-tensor quantization. Requires ARMv8.6+ I8MM support.
+/// Falls back to FP32 if unavailable.
+void gemm_int8(int M, int N, int K,
+               float alpha, const float* A, int lda,
+               const float* B, int ldb,
+               float beta, float* C, int ldc);
+
 }  // namespace dnnopt

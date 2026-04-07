@@ -25,6 +25,12 @@ void gemm_driver_bf16(int M, int N, int K,
                       const float* B, int ldb,
                       float beta, float* C, int ldc);
 
+// INT8 SMMLA driver (defined in gemm_driver_int8.cpp)
+void gemm_driver_int8(int M, int N, int K,
+                      float alpha, const float* A, int lda,
+                      const float* B, int ldb,
+                      float beta, float* C, int ldc);
+
 namespace {
 
 /// Naive FP32 GEMM: C = alpha * A * B + beta * C
@@ -100,6 +106,28 @@ void gemm_bf16(int M, int N, int K,
 #endif
 
     // Fallback to FP32 if BF16 not available
+    gemm_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+}
+
+void gemm_int8(int M, int N, int K,
+               float alpha, const float* A, int lda,
+               const float* B, int ldb,
+               float beta, float* C, int ldc) {
+    if (M <= 0 || N <= 0 || K <= 0) return;
+
+#ifdef __ARM_NEON
+    const auto& hw = detect_arm_hwcaps();
+    if (hw.hwcaps & static_cast<uint64_t>(HwCap::kI8MM)) {
+        // Small-M: memory-bound, quantization overhead not worth it
+        if (M <= kGemmMrInt8 / 2)
+            gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        else
+            gemm_driver_int8(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+#endif
+
+    // Fallback to FP32 if I8MM not available
     gemm_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 

@@ -15,6 +15,10 @@ constexpr int kGemmNrFp32 = 12;
 constexpr int kGemmMrBf16 = 8;
 constexpr int kGemmNrBf16 = 8;
 
+// INT8 SMMLA microkernel tile dimensions.
+constexpr int kGemmMrInt8 = 8;
+constexpr int kGemmNrInt8 = 8;
+
 /// Select cache blocking parameters based on detected CPU.
 inline GemmBlockingParams get_gemm_blocking_params() {
     const auto& hw = detect_arm_hwcaps();

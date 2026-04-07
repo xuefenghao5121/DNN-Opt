@@ -10,6 +10,9 @@ add_library(dnnopt_core STATIC
     gemm/gemm_pack_bf16.cpp
     gemm/gemm_ukernel_bf16_neon.cpp
     gemm/gemm_driver_bf16.cpp
+    gemm/gemm_pack_int8.cpp
+    gemm/gemm_ukernel_int8_neon.cpp
+    gemm/gemm_driver_int8.cpp
 )
 
 target_include_directories(dnnopt_core PUBLIC

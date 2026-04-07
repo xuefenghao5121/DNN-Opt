@@ -247,6 +247,23 @@ int main(int argc, char** argv) {
             }
             all_results.push_back(stats);
         }
+
+        // INT8 GEMM (SMMLA microkernel)
+        if (hw.hwcaps & static_cast<uint64_t>(dnnopt::HwCap::kI8MM)) {
+            char name[128];
+            snprintf(name, sizeof(name), "%s [%dx%dx%d] int8", shape.label, M, N, K);
+            auto stats = dnnopt::benchmark(name, flops, bytes, warmup, runs, [&]() {
+                memset(C.get(), 0, c_size * sizeof(float));
+                dnnopt::gemm_int8(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+            });
+            dnnopt::print_bench_stats(stats);
+            double int8_peak = hw.int8_gops_per_core;
+            if (int8_peak > 0) {
+                printf("  >> %.1f%% of INT8 peak (%.2f GOPS)\n",
+                       100.0 * stats.gflops / int8_peak, int8_peak);
+            }
+            all_results.push_back(stats);
+        }
 #endif
         printf("\n");
     }
