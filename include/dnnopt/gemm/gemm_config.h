@@ -11,6 +11,10 @@ namespace dnnopt {
 constexpr int kGemmMrFp32 = 8;
 constexpr int kGemmNrFp32 = 12;
 
+// BF16 BFMMLA microkernel tile dimensions.
+constexpr int kGemmMrBf16 = 8;
+constexpr int kGemmNrBf16 = 8;
+
 /// Select cache blocking parameters based on detected CPU.
 inline GemmBlockingParams get_gemm_blocking_params() {
     const auto& hw = detect_arm_hwcaps();

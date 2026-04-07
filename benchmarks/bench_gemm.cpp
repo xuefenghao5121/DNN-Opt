@@ -230,6 +230,23 @@ int main(int argc, char** argv) {
             }
             all_results.push_back(stats);
         }
+
+        // BF16 GEMM (BFMMLA microkernel)
+        if (hw.hwcaps & static_cast<uint64_t>(dnnopt::HwCap::kBF16)) {
+            char name[128];
+            snprintf(name, sizeof(name), "%s [%dx%dx%d] bf16", shape.label, M, N, K);
+            auto stats = dnnopt::benchmark(name, flops, bytes, warmup, runs, [&]() {
+                memset(C.get(), 0, c_size * sizeof(float));
+                dnnopt::gemm_bf16(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+            });
+            dnnopt::print_bench_stats(stats);
+            double bf16_peak = hw.bf16_gflops_per_core;
+            if (bf16_peak > 0) {
+                printf("  >> %.1f%% of BF16 peak (%.2f GFLOPS)\n",
+                       100.0 * stats.gflops / bf16_peak, bf16_peak);
+            }
+            all_results.push_back(stats);
+        }
 #endif
         printf("\n");
     }

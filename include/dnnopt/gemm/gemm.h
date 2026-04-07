@@ -23,4 +23,11 @@ void gemm_fp32(int M, int N, int K,
                float beta, float* C, int ldc,
                GemmAlgo algo);
 
+/// BF16 GEMM: input/output FP32, internal compute BF16 via BFMMLA.
+/// Requires ARMv8.6+ BF16 support. Falls back to FP32 if unavailable.
+void gemm_bf16(int M, int N, int K,
+               float alpha, const float* A, int lda,
+               const float* B, int ldb,
+               float beta, float* C, int ldc);
+
 }  // namespace dnnopt

@@ -118,6 +118,20 @@ void test_gemm_shape(int M, int N, int K, const char* label) {
                  label, M, N, K, md, tol);
         TEST_ASSERT(md < tol, msg);
     }
+
+    // Test BF16 GEMM (BFMMLA path, relaxed tolerance for BF16 7-bit mantissa)
+    {
+        auto C_bf16 = dnnopt::aligned_array<float>(c_sz);
+        memset(C_bf16.get(), 0, c_sz * sizeof(float));
+        dnnopt::gemm_bf16(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C_bf16.get(), N);
+        float md = max_diff(C_ref.get(), C_bf16.get(), c_sz);
+        float bf16_tol = K * 2e-3f;  // BF16 has ~7-bit mantissa
+
+        char msg[128];
+        snprintf(msg, sizeof(msg), "BF16 GEMM %s [%dx%dx%d] max_diff=%.6e tol=%.6e",
+                 label, M, N, K, md, bf16_tol);
+        TEST_ASSERT(md < bf16_tol, msg);
+    }
 }
 
 }  // namespace
