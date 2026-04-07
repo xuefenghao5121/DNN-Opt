@@ -56,8 +56,11 @@ void gemm_driver_fp32(int M, int N, int K,
             // beta handling: only apply original beta on the first K-pass;
             // subsequent passes accumulate (beta=1.0)
             float beta_eff = (pc == 0) ? beta : 1.0f;
-            // alpha: only apply on the last K-pass; use 1.0 for intermediate passes
-            float alpha_eff = (pc + kc >= K) ? alpha : 1.0f;
+            // alpha: apply on every K-pass so each partial sum is scaled
+            // uniformly. Combined with beta_eff this gives:
+            //   First pass:  C = alpha * partial_0 + beta * C_old
+            //   Later passes: C = alpha * partial_i + 1.0 * C_accumulated
+            float alpha_eff = alpha;
 
             // Pack B panel: B[pc:pc+kc, jc:jc+nc]
             pack_b_fp32(kc, nc, &B[pc * ldb + jc], ldb, packed_B.get());

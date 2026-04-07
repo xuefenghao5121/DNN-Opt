@@ -106,6 +106,7 @@ endif()
 if(DNNOPT_BUILD_BLAS)
     add_library(dnnopt_blas SHARED
         blas/cblas_sgemm.cpp
+        blas/cblas_saxpy.cpp
         blas/blas_fortran.cpp
         blas/blas_utils.cpp
     )

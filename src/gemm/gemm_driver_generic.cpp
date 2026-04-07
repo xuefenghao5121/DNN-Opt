@@ -119,7 +119,11 @@ void gemm_driver_generic(int M, int N, int K,
         int kc_padded = (Kgroup > 1) ? ((kc + Kgroup - 1) / Kgroup) * Kgroup : kc;
 
         float beta_eff  = (pc == 0) ? beta : 1.0f;
-        float alpha_eff = (pc + kc >= K) ? alpha : 1.0f;
+        // Apply alpha on every K-pass so each partial sum is scaled
+        // uniformly. Combined with beta_eff this gives:
+        //   First pass:  C = alpha * partial_0 + beta * C_old
+        //   Later passes: C = alpha * partial_i + 1.0 * C_accumulated
+        float alpha_eff = alpha;
 
         size_t a_stride = a_panel_stride(kc_padded);
         size_t b_stride = b_panel_stride(kc_padded);

@@ -36,6 +36,11 @@ void cblas_sgemm(enum CBLAS_ORDER Order,
                  float beta,
                  float *C, int ldc);
 
+/// Single-precision vector scale and add: Y = alpha * X + Y
+/// Used by oneDNN for bias application after GEMM.
+void cblas_saxpy(int N, float alpha, const float *X, int incX,
+                 float *Y, int incY);
+
 /// Thread control (OpenBLAS-compatible).
 void openblas_set_num_threads(int num_threads);
 int  openblas_get_num_threads(void);
