@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace dnnopt {
 
@@ -36,6 +37,22 @@ struct CacheInfo {
     uint32_t sets       = 0;   // Number of sets
 };
 
+/// Core cluster descriptor for big.LITTLE topology.
+struct CoreCluster {
+    uint32_t first_cpu = 0;       // First CPU index in cluster
+    uint32_t count = 0;           // Number of CPUs in cluster
+    uint32_t max_freq_khz = 0;    // Max frequency from cpuinfo_max_freq
+    bool is_big = true;           // Performance core (true) vs efficiency (false)
+};
+
+/// CPU core topology (big.LITTLE awareness).
+struct CoreTopology {
+    std::vector<CoreCluster> clusters;
+    uint32_t big_cores = 0;       // Total performance cores
+    uint32_t little_cores = 0;    // Total efficiency cores
+    bool is_heterogeneous = false; // True if big.LITTLE detected
+};
+
 /// Complete hardware profile for the current ARM CPU.
 struct ArmHwProfile {
     // CPU identification
@@ -58,6 +75,9 @@ struct ArmHwProfile {
     CacheInfo   l1i;   // L1 Instruction
     CacheInfo   l2;    // L2 Unified
     CacheInfo   l3;    // L3 Unified (may be 0 if not present)
+
+    // Core topology (big.LITTLE awareness)
+    CoreTopology topology;
 
     // Theoretical peak performance (single core)
     double      fp32_gflops_per_core = 0.0;

@@ -84,6 +84,11 @@ bool dispatch_via_registry(GemmDataType dtype,
     cfg.pack_a = desc->pack_a;
     cfg.pack_b = desc->pack_b;
 
+    // Threading config from tuning profile
+    cfg.threading_min_flops = profile.threading_min_flops;
+    cfg.prefer_2d_threading = profile.prefer_2d_threading;
+    cfg.shape = classify_shape(M, N, K);
+
     gemm_driver_generic(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, cfg);
     return true;
 }

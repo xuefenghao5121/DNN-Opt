@@ -1,6 +1,6 @@
 # DNN-Opt: ARM Platform Deep Learning Optimization Library
 
-**Version: 0.3.2** (Phase 3B+/3D: SVE VLA + SME Framework)
+**Version: 0.3.3** (Phase 3C: Advanced Multi-threading)
 
 ARM 平台高性能深度学习推理优化库，充分利用 NEON/SVE/SVE2/SME 指令集和微架构特征，在 ARM CPU 环境下实现极致推理性能。
 
@@ -36,7 +36,10 @@ ARM 平台高性能深度学习推理优化库，充分利用 NEON/SVE/SVE2/SME 
 - **SVE-128 Optimized**: Dedicated SVE-128 microkernels with predicated edge handling, software prefetch, and vectorized packing
 - **SVE VLA Kernels**: Register-resident accumulators for SVE-256/512, 4x K-loop unroll, col-pair chunking for BF16/INT8
 - **SME Framework**: Complete FMOPA/BFMOPA/SMOPA microkernels with ZA tile management and streaming mode transitions
-- **Generic BLIS Driver**: Parameterized 5-loop implementation with OpenMP threading
+- **2D Thread Decomposition**: Adaptive M×N parallelism with shape-aware scheduling (replaces M-only)
+- **Big.LITTLE Awareness**: Core topology detection, performance-core-first scheduling, thread affinity
+- **Huge Page Allocation**: MAP_HUGETLB + MADV_HUGEPAGE for large packing buffers (reduced TLB misses)
+- **Generic BLIS Driver**: Parameterized 5-loop implementation with OpenMP 2D threading
 
 ## Build
 
@@ -78,7 +81,8 @@ onednn-arm-opt/
 │       ├── gemm_config.h         # Adaptive cache blocking
 │       ├── gemm_autotune.h       # Runtime auto-tuning [NEW v0.3.0]
 │       ├── gemm_driver_generic.h # Generic BLIS 5-loop driver
-│       ├── gemm_threading.h      # Thread control
+│       ├── gemm_threading.h      # Thread control + big.LITTLE affinity [UPD v0.3.3]
+│       ├── gemm_thread_decomp.h  # 2D M×N thread decomposition [NEW v0.3.3]
 │       └── gemm_ukernel_registry.h # Microkernel registry
 ├── src/
 │   ├── hwcaps/arm_hwcaps.cpp     # CPU detection (/proc/cpuinfo + sysfs)
@@ -108,6 +112,23 @@ onednn-arm-opt/
 ```
 
 ## Development Log
+
+### v0.3.3 — Phase 3C: Advanced Multi-threading (2026-04-07)
+
+New: 2D thread decomposition, big.LITTLE awareness, and memory optimization.
+
+- **2D M×N thread decomposition**: Replaces M-only parallelism. Thread team factored
+  into (mt, nt) with shape-aware bias: tall-skinny → more mt, short-wide → more nt.
+  Each thread handles independent M-block × N-block ranges with per-group buffers.
+- **Core topology detection**: Reads per-CPU max frequency from sysfs, clusters cores
+  by frequency, detects big.LITTLE heterogeneous configurations (>30% freq delta).
+- **Big.LITTLE scheduling**: Performance cores used first via `pthread_setaffinity_np`.
+  Medium workloads limited to big cores; large workloads use all cores.
+- **Threading profile wiring**: `threading_min_flops` and `prefer_2d_threading` from
+  CpuTuningProfile now drive thread count and decomposition decisions.
+- **Huge page allocation**: `MAP_HUGETLB` for packed B buffers >2MB with transparent
+  fallback to `mmap` + `MADV_HUGEPAGE`, then `posix_memalign`.
+- **hwcaps_report**: Now displays core topology (cluster count, freq, big/LITTLE status).
 
 ### v0.3.2 — Phase 3B+/3D: SVE VLA + SME Framework (2026-04-07)
 
@@ -196,10 +217,11 @@ Design inspired by [autoGEMM (SC'24)](https://github.com/wudu98/autoGEMM) dynami
 
 ## Roadmap
 
-### Phase 3C: Advanced Multi-threading (Next)
-- M x N 2D thread decomposition (replace M-only parallelism)
-- big.LITTLE core topology awareness
-- NUMA-aware buffer allocation, huge pages
+### Phase 3C: Advanced Multi-threading (Complete)
+- M×N 2D thread decomposition with shape-aware scheduling
+- big.LITTLE core topology detection and affinity scheduling
+- Huge page allocation for large packing buffers
+- Threading hints wired from CpuTuningProfile
 
 ### Phase 3D: SME Framework (Complete)
 - Complete FMOPA/BFMOPA/SMOPA microkernels with ZA tile management

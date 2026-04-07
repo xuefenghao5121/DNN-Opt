@@ -5,6 +5,7 @@
 
 #include "dnnopt/gemm/gemm_ukernel_registry.h"
 #include "dnnopt/gemm/gemm_types.h"
+#include "dnnopt/cpu_tuning_profile.h"
 
 namespace dnnopt {
 
@@ -19,6 +20,11 @@ struct GemmDriverConfig {
     UkernelFn ukernel;
     PackAFn pack_a;
     PackBFn pack_b;
+
+    // Threading control (from CpuTuningProfile)
+    int threading_min_flops = 200000;
+    bool prefer_2d_threading = true;
+    ShapeClass shape = ShapeClass::kSquare;
 };
 
 /// Generic BLIS 5-loop GEMM driver.

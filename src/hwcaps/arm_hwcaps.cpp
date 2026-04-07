@@ -8,6 +8,8 @@
 #include <fstream>
 #include <sstream>
 #include <thread>
+#include <map>
+#include <algorithm>
 
 #ifdef __linux__
 #include <sys/auxv.h>
@@ -229,6 +231,79 @@ void detect_caches(ArmHwProfile& p) {
 }
 
 // ============================================================
+// Detect core topology (big.LITTLE awareness)
+// ============================================================
+void detect_core_topology(ArmHwProfile& p) {
+    // Read max frequency for each online CPU
+    std::map<uint32_t, std::vector<uint32_t>> freq_to_cpus;
+    uint32_t n_cpus = p.num_cores;
+    if (n_cpus == 0) n_cpus = std::thread::hardware_concurrency();
+
+    for (uint32_t cpu = 0; cpu < n_cpus; ++cpu) {
+        char path[256];
+        snprintf(path, sizeof(path),
+                 "/sys/devices/system/cpu/cpu%u/cpufreq/cpuinfo_max_freq", cpu);
+        std::ifstream f(path);
+        uint32_t freq_khz = 0;
+        if (f.is_open()) f >> freq_khz;
+        if (freq_khz == 0) {
+            // Fallback: try scaling_max_freq
+            snprintf(path, sizeof(path),
+                     "/sys/devices/system/cpu/cpu%u/cpufreq/scaling_max_freq", cpu);
+            std::ifstream f2(path);
+            if (f2.is_open()) f2 >> freq_khz;
+        }
+        if (freq_khz == 0) freq_khz = p.freq_mhz * 1000;  // use detected freq
+        freq_to_cpus[freq_khz].push_back(cpu);
+    }
+
+    if (freq_to_cpus.empty()) {
+        // No frequency info — assume homogeneous
+        CoreCluster c;
+        c.first_cpu = 0;
+        c.count = n_cpus;
+        c.max_freq_khz = p.freq_mhz * 1000;
+        c.is_big = true;
+        p.topology.clusters.push_back(c);
+        p.topology.big_cores = n_cpus;
+        p.topology.little_cores = 0;
+        p.topology.is_heterogeneous = false;
+        return;
+    }
+
+    // Build clusters sorted by frequency (highest = big)
+    uint32_t max_freq = freq_to_cpus.rbegin()->first;
+    uint32_t min_freq = freq_to_cpus.begin()->first;
+    // Heterogeneous if max/min frequency ratio > 1.3
+    bool heterogeneous = (min_freq > 0) && (max_freq > min_freq * 13 / 10);
+
+    p.topology.big_cores = 0;
+    p.topology.little_cores = 0;
+
+    for (auto& [freq, cpus] : freq_to_cpus) {
+        std::sort(cpus.begin(), cpus.end());
+        CoreCluster c;
+        c.first_cpu = cpus.front();
+        c.count = (uint32_t)cpus.size();
+        c.max_freq_khz = freq;
+        c.is_big = !heterogeneous || (freq == max_freq);
+        p.topology.clusters.push_back(c);
+        if (c.is_big)
+            p.topology.big_cores += c.count;
+        else
+            p.topology.little_cores += c.count;
+    }
+
+    // Sort clusters: big cores first
+    std::sort(p.topology.clusters.begin(), p.topology.clusters.end(),
+              [](const CoreCluster& a, const CoreCluster& b) {
+                  return a.max_freq_khz > b.max_freq_khz;
+              });
+
+    p.topology.is_heterogeneous = heterogeneous;
+}
+
+// ============================================================
 // Compute theoretical peak performance
 // ============================================================
 void compute_peak_perf(ArmHwProfile& p) {
@@ -281,6 +356,7 @@ const ArmHwProfile& detect_arm_hwcaps() {
         detect_hwcaps_auxval(p);
         detect_sve_vl(p);
         detect_caches(p);
+        detect_core_topology(p);
         compute_peak_perf(p);
         return p;
     }();
@@ -341,6 +417,17 @@ void print_hwcaps_summary(const ArmHwProfile& profile) {
     if (p.int8_gops_per_core > 0)
         printf("║   INT8:  %7.2f GOPS                                ║\n",
                p.int8_gops_per_core);
+    printf("╠══════════════════════════════════════════════════════╣\n");
+    printf("║ Core Topology:                                      ║\n");
+    printf("║   Clusters: %-2zu  Heterogeneous: %-3s                  ║\n",
+           p.topology.clusters.size(),
+           p.topology.is_heterogeneous ? "YES" : "NO");
+    for (size_t ci = 0; ci < p.topology.clusters.size(); ++ci) {
+        const auto& cl = p.topology.clusters[ci];
+        printf("║   Cluster %zu: %u cores @ %u MHz (%s)              ║\n",
+               ci, cl.count, cl.max_freq_khz / 1000,
+               cl.is_big ? "big" : "LITTLE");
+    }
     printf("╚══════════════════════════════════════════════════════╝\n");
 }
 
