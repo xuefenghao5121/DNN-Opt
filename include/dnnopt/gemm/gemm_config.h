@@ -19,6 +19,9 @@ namespace dnnopt {
 constexpr int kGemmMrFp32 = 8;
 constexpr int kGemmNrFp32 = 12;
 
+// Threshold for unpacked fast path: use when M*N*K < this and M <= 32
+constexpr int64_t kUnpackedFlopsThreshold = 4 * 1024 * 1024;  // ~8M FLOPs
+
 // BF16 BFMMLA microkernel tile dimensions.
 constexpr int kGemmMrBf16 = 8;
 constexpr int kGemmNrBf16 = 8;
@@ -194,5 +197,29 @@ void gemm_smallm_driver_fp32_v2(int M, int N, int K,
                                  float alpha, const float* A, int lda,
                                  const float* B, int ldb,
                                  float beta, float* C, int ldc);
+
+/// Wide-panel small-M driver (48-col panels, optimized for M=2-7).
+void gemm_smallm_wide_driver_fp32(int M, int N, int K,
+                                   float alpha, const float* A, int lda,
+                                   const float* B, int ldb,
+                                   float beta, float* C, int ldc);
+
+/// Unpacked driver for M=8-32 (skips packing, reads A/B directly).
+void gemm_driver_unpacked_fp32(int M, int N, int K,
+                                float alpha, const float* A, int lda,
+                                const float* B, int ldb,
+                                float beta, float* C, int ldc);
+
+/// Small-K GEMM (K ≤ 16): preloads B, shares across M rows.
+void gemm_smallK_fp32(int M, int N, int K,
+                       float alpha, const float* A, int lda,
+                       const float* B, int ldb,
+                       float beta, float* C, int ldc);
+
+/// Mx1 GEMM (matrix-vector, defined in gemm_tiny_fp32.cpp).
+void gemm_mx1_fp32(int M, int K,
+                    float alpha, const float* A, int lda,
+                    const float* B, int ldb,
+                    float beta, float* C, int ldc);
 
 }  // namespace dnnopt

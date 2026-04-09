@@ -21,6 +21,10 @@ void gemm_smallm_driver_fp32(int M, int N, int K,
                               float alpha, const float* A, int lda,
                               const float* B, int ldb,
                               float beta, float* C, int ldc);
+void gemm_smallm_wide_driver_fp32(int M, int N, int K,
+                                   float alpha, const float* A, int lda,
+                                   const float* B, int ldb,
+                                   float beta, float* C, int ldc);
 void gemm_driver_bf16(int M, int N, int K,
                       float alpha, const float* A, int lda,
                       const float* B, int ldb,
@@ -136,10 +140,40 @@ void gemm_fp32(int M, int N, int K,
         // Small-M uses dedicated fast path (no packing)
         if (M < kGemmMrFp32) {
 #ifdef __ARM_NEON
-            gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+            if (M == 1) {
+                gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+            } else {
+                gemm_smallm_wide_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+            }
             return;
 #endif
         }
+
+#ifdef __ARM_NEON
+        // Phase 7D: small-K fast path (K ≤ 16): preloads B, shares across rows
+        if (K <= 16) {
+            gemm_smallK_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+            return;
+        }
+
+        // Phase 7B: unpacked path for small shapes where packing overhead dominates
+        // M<=32: any shape under threshold; M>32: only tall-thin (N<=16)
+        if ((int64_t)M * N * K < kUnpackedFlopsThreshold &&
+            (M <= 32 || N <= 16)) {
+            gemm_driver_unpacked_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+            return;
+        }
+
+        // Phase 7C: tall-thin (M>=32, N<=16) → per-column GEMV
+        // Only for shapes too large for unpacked path
+        if (M >= 32 && N <= 16) {
+            for (int j = 0; j < N; ++j)
+                gemm_mx1_fp32(M, K, alpha, A, lda,
+                              B + j, ldb, beta, C + j, ldc);
+            return;
+        }
+#endif
+
         if (dispatch_via_registry(GemmDataType::kFP32, M, N, K,
                                   alpha, A, lda, B, ldb, beta, C, ldc))
             return;
@@ -148,10 +182,22 @@ void gemm_fp32(int M, int N, int K,
     // Explicit NEON or fallback from registry
 #ifdef __ARM_NEON
     if (algo == GemmAlgo::kNeonFp32 || algo == GemmAlgo::kAuto) {
-        if (M < kGemmMrFp32)
-            gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
-        else
+        if (M < kGemmMrFp32) {
+            if (M == 1)
+                gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+            else
+                gemm_smallm_wide_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        } else if (K <= 16) {
+            gemm_smallK_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        } else if ((int64_t)M * N * K < kUnpackedFlopsThreshold &&
+                   (M <= 32 || N <= 16)) {
+            gemm_driver_unpacked_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        } else if (M >= 32 && N <= 16) {
+            for (int j = 0; j < N; ++j)
+                gemm_mx1_fp32(M, K, alpha, A, lda, B + j, ldb, beta, C + j, ldc);
+        } else {
             gemm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        }
         return;
     }
 #endif

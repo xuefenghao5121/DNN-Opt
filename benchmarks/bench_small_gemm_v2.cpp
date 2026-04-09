@@ -71,29 +71,29 @@ constexpr TestShape kTestShapes[] = {
 };
 // clang-format on
 
-/// Allocate aligned matrix.
+/// Allocate aligned matrix (row-major: rows × lda elements).
 std::vector<float> alloc_matrix(int rows, int cols, int lda) {
-    std::vector<float> mat(lda * cols, 0.0f);
+    std::vector<float> mat((size_t)rows * lda, 0.0f);
     return mat;
 }
 
-/// Initialize matrix with random values.
+/// Initialize matrix with random values (row-major: mat[i*lda + j]).
 void init_matrix(int rows, int cols, int lda, float* mat, std::mt19937& rng) {
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (int j = 0; j < cols; ++j) {
-        for (int i = 0; i < rows; ++i) {
-            mat[i + j * lda] = dist(rng);
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            mat[i * lda + j] = dist(rng);
         }
     }
 }
 
-/// Verify result against reference.
+/// Verify result against reference (row-major: C[i*ldc + j]).
 bool verify_result(int M, int N, const float* C, const float* C_ref, int ldc,
                    float eps = 1e-4f) {
     float max_error = 0.0f;
-    for (int j = 0; j < N; ++j) {
-        for (int i = 0; i < M; ++i) {
-            float error = std::abs(C[i + j * ldc] - C_ref[i + j * ldc]);
+    for (int i = 0; i < M; ++i) {
+        for (int j = 0; j < N; ++j) {
+            float error = std::abs(C[i * ldc + j] - C_ref[i * ldc + j]);
             max_error = std::max(max_error, error);
         }
     }
@@ -224,15 +224,15 @@ int main(int argc, char** argv) {
         init_matrix(M, K, lda, A.data(), rng);
         init_matrix(K, N, ldb, B.data(), rng);
 
-        // Compute reference with naive implementation
-        std::vector<float> C_naive(M * N, 0.0f);
-        for (int j = 0; j < N; ++j) {
-            for (int i = 0; i < M; ++i) {
+        // Compute reference with naive implementation (row-major, matching kernel convention)
+        std::vector<float> C_naive(M * ldc, 0.0f);
+        for (int i = 0; i < M; ++i) {
+            for (int j = 0; j < N; ++j) {
                 float sum = 0.0f;
                 for (int k = 0; k < K; ++k) {
-                    sum += A[i + k * lda] * B[k + j * ldb];
+                    sum += A[i * lda + k] * B[k * ldb + j];
                 }
-                C_naive[i + j * ldc] = sum;
+                C_naive[i * ldc + j] = sum;
             }
         }
 
