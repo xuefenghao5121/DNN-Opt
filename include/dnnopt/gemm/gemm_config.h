@@ -179,4 +179,20 @@ inline GemmBlockingParams get_gemm_blocking_params() {
     return p;
 }
 
+// ============================================================
+// v2 optimized functions (prefetch + software pipelining)
+// ============================================================
+
+/// v1 small-M driver (baseline).
+void gemm_smallm_driver_fp32(int M, int N, int K,
+                              float alpha, const float* A, int lda,
+                              const float* B, int ldb,
+                              float beta, float* C, int ldc);
+
+/// v2 small-M driver with prefetch optimizations.
+void gemm_smallm_driver_fp32_v2(int M, int N, int K,
+                                 float alpha, const float* A, int lda,
+                                 const float* B, int ldb,
+                                 float beta, float* C, int ldc);
+
 }  // namespace dnnopt

@@ -4,6 +4,12 @@ target_link_libraries(bench_gemm PRIVATE dnnopt_core)
 add_executable(bench_small_gemm bench_small_gemm.cpp)
 target_link_libraries(bench_small_gemm PRIVATE dnnopt_core)
 
+add_executable(bench_small_gemm_v2 bench_small_gemm_v2.cpp)
+target_link_libraries(bench_small_gemm_v2 PRIVATE dnnopt_core)
+
+add_executable(bench_threading bench_threading.cpp)
+target_link_libraries(bench_threading PRIVATE dnnopt_core)
+
 add_executable(bench_conv bench_conv.cpp)
 target_link_libraries(bench_conv PRIVATE dnnopt_core)
 
