@@ -143,11 +143,22 @@ void gemm_fp32(int M, int N, int K,
         // Small-M uses dedicated fast path (no packing)
         // Phase B: M=2-7 with large N use wide driver (48-col macro-tiling + Kc blocking).
         // M=1 uses dedicated GEMV path. M=4-7 with small N falls through to adaptive tile.
+        // Phase 13: When N*K is very large, prefer packed path with threading instead
+        // of small-M path — packing overhead is amortized and threading is beneficial.
         if (M < 8) {
 #ifdef __ARM_NEON
             if (M == 1) {
                 gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
                 return;
+            }
+            // Phase 13: For M=4-7 with very large N*K, use packed registry path.
+            // This enables 2D threading + huge pages, which outperforms small-M
+            // wide driver for shapes like batch4-LLM (4×4096×4096).
+            // Threshold: N*K > 4M (e.g., N=4096, K>=1024 or N>=1024, K=4096)
+            constexpr int64_t kLargeNKThreshold = 4 * 1024 * 1024;
+            if (M >= 4 && (int64_t)N * K > kLargeNKThreshold) {
+                // Fall through to registry dispatch (packed + threaded)
+                goto registry_dispatch;
             }
             // M=2-7: use wide driver for N >= 48 (macro-tiling benefit).
             // M=2-3: always use wide driver (was original routing).
@@ -179,6 +190,7 @@ void gemm_fp32(int M, int N, int K,
         }
 #endif
 
+        registry_dispatch:
         if (dispatch_via_registry(GemmDataType::kFP32, M, N, K,
                                   alpha, A, lda, B, ldb, beta, C, ldc))
             return;

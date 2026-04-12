@@ -32,7 +32,7 @@ void gemm_ukernel_bf16_8x8(int K,
                             const bfloat16_t* packed_B,
                             float* C, int ldc,
                             float alpha, float beta) {
-    // Cast to __bf16* for GCC NEON intrinsics
+    // Cast to __bf16* for NEON intrinsics (portable: works on GCC and Clang with +bf16)
     const __bf16* pa = reinterpret_cast<const __bf16*>(packed_A);
     const __bf16* pb = reinterpret_cast<const __bf16*>(packed_B);
 

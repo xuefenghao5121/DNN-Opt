@@ -34,7 +34,12 @@ option(DNNOPT_BUILD_BLAS "Build BLAS-compatible shared library (libdnnopt_blas.s
 # ============================================================
 if(DNNOPT_AARCH64)
     if(DNNOPT_NATIVE_ARCH)
-        set(ARCH_FLAGS "-march=native")
+        # Use native arch with BF16 extension for Clang (needed for BF16 intrinsics)
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            set(ARCH_FLAGS "-march=armv8.5-a+bf16+dotprod+fp16+i8mm")
+        else()
+            set(ARCH_FLAGS "-march=native")
+        endif()
     else()
         # Minimum target: ARMv8.2-a with common extensions
         set(ARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")
@@ -62,6 +67,11 @@ endif()
 # OpenMP
 # ============================================================
 if(DNNOPT_USE_OPENMP)
+    # When using Clang, prefer GNU OpenMP (libgomp) for compatibility with oneDNN
+    if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        set(OpenMP_CXX_FLAGS "-fopenmp=libgomp" CACHE STRING "" FORCE)
+        set(OpenMP_C_FLAGS "-fopenmp=libgomp" CACHE STRING "" FORCE)
+    endif()
     find_package(OpenMP)
     if(OpenMP_CXX_FOUND)
         message(STATUS "OpenMP found: ${OpenMP_CXX_VERSION}")

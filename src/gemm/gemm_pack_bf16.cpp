@@ -64,7 +64,6 @@ void pack_a_bf16(int m_len, int k_len,
                 bfloat16x4_t b0 = vcvt_bf16_f32(f0);
                 bfloat16x4_t b1 = vcvt_bf16_f32(f1);
                 bfloat16x8_t combined = vcombine_bf16(b0, b1);
-                // GCC's bfloat16_t is __bf16, need cast from dnnopt::bfloat16_t*
                 vst1q_bf16(reinterpret_cast<__bf16*>(packed_A), combined);
                 packed_A += 8;
             }
@@ -110,7 +109,6 @@ void pack_b_bf16(int k_len, int n_len,
                 bfloat16x4_t b0 = vcvt_bf16_f32(f0);
                 bfloat16x4_t b1 = vcvt_bf16_f32(f1);
                 bfloat16x8_t combined = vcombine_bf16(b0, b1);
-                // GCC's bfloat16_t is __bf16, need cast from dnnopt::bfloat16_t*
                 vst1q_bf16(reinterpret_cast<__bf16*>(packed_B), combined);
                 packed_B += 8;
             }

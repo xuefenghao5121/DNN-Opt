@@ -246,10 +246,13 @@ static void gemm_sme_fp32_microkernel(int M, int N, int K,
 
         // Outer product: C += a[:,k] @ b[k,:]
         // With SME: FMOPA ZA tile, then store
-        // Software fallback:
+        // Software fallback: extract to scalar array for portability
+        float a_vals[4], b_vals[4];
+        vst1q_f32(a_vals, a_vec);
+        vst1q_f32(b_vals, b_vec);
         for (int i = 0; i < M; ++i) {
             for (int j = 0; j < N; ++j) {
-                C[i * ldc + j] += vgetq_lane_f32(a_vec, i) * vgetq_lane_f32(b_vec, j);
+                C[i * ldc + j] += a_vals[i] * b_vals[j];
             }
         }
     }

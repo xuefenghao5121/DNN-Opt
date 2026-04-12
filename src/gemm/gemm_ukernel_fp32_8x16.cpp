@@ -1,21 +1,21 @@
 /// @file gemm_ukernel_fp32_8x16.cpp
 /// Packed 8x16 FP32 NEON intrinsics micro-kernel for BLIS-style GEMM registry.
 ///
+/// Clang-optimized: uses vfmaq_laneq_f32 (fused broadcast + FMLA via .s[N])
+/// instead of GCC-only vfmaq_n_f32 (separate broadcast + FMLA).
+///
 /// Register budget: 8x16 = 32 accumulators → fills all 32 NEON SIMD registers.
 /// Strategy: 2-pass approach within the K loop:
-///   - Load 4 B quads (v0-v3) once per K iteration
-///   - Process rows 0-3 (acc in stack-backed array), then rows 4-7
-///   - Each pass uses 16 acc + 4 B = 20 regs, no spill
+///   - Load A as float32x4_t (4 K-values), use .s[0..3] for each K step
+///   - Load B panel (4 quads = 16 cols) once per K step, shared across 2 passes
+///   - Each pass: 16 acc + 4 B + 1 A = 21 regs, no spill
 ///
 /// Packed memory layout (same as 4x16):
 ///   packed_A: for each k, 8 contiguous floats (Mr=8 rows) → scalar loads
 ///   packed_B: for each k, 16 contiguous floats (Nr=16 cols) → 4 × ldr q
 ///
-/// GCC-compatible: uses vfmaq_n_f32 (scalar broadcast + FMLA) instead of
-/// the Clang-only .s[N] subscript syntax on float32x4_t.
-///
-/// Performance: packed sequential access eliminates stride calculations,
-/// prefetch-friendly, and B is loaded once per K step for all 8 rows.
+/// Performance: 4x K-unrolling via A quad .s[0..3] extraction.
+/// PRFM prefetch for packed sequential access patterns.
 
 #include "dnnopt/gemm/gemm_config.h"
 #include "dnnopt/gemm/gemm_ukernel_registry.h"
@@ -98,16 +98,18 @@ static void pack_b_fp32_8x16(int k_len, int n_len,
 }
 
 // ============================================================
-// Packed 8x16 NEON intrinsics micro-kernel (GCC-compatible)
+// Packed 8x16 NEON intrinsics micro-kernel (Clang-optimized)
 // ============================================================
 //
-// Strategy: 2-pass within K loop to fit in 32 SIMD registers.
-//   Pass 1: rows 0-3, 16 acc + 4 B = 20 regs
-//   Pass 2: rows 4-7, 16 acc + 4 B = 20 regs
-// B is loaded once and shared across both passes.
+// Strategy: Load A as float32x4_t (4 K-values packed contiguously).
+// Use vfmaq_laneq_f32 to broadcast each .s[0..3] element and FMLA.
+// This compiles to a single FMLA instruction with .s[N] index.
 //
-// A values loaded as scalars, applied via vfmaq_n_f32 (scalar broadcast).
-// With 4x K-unrolling and PRFM prefetch for packed sequential access.
+// 2-pass within K loop to fit in 32 SIMD registers:
+//   Pass 1: rows 0-3, 16 acc + 4 B + 1 A = 21 regs
+//   Pass 2: rows 4-7, 16 acc + 4 B (shared) + 1 A (shared) = 21 regs
+//
+// With 4x K-unrolling via .s[0..3] from A quad.
 
 static void gemm_ukernel_fp32_packed_8x16(
         int K,
@@ -139,7 +141,7 @@ static void gemm_ukernel_fp32_packed_8x16(
     const float* __restrict__ pA = packed_A;
     const float* __restrict__ pB = packed_B;
 
-    // 4x K-unrolled main loop
+    // 4x K-unrolled main loop: load A as quad, use .s[0..3]
     int k = 0;
     for (; k + 3 < K; k += 4) {
         // Prefetch A and B ahead (packed layout: sequential access)
@@ -148,45 +150,59 @@ static void gemm_ukernel_fp32_packed_8x16(
             __asm__ volatile("prfm pldl1keep, [%0]" : : "r"(pB + 64) : "memory");
         }
 
-        // --- K iteration 0 ---
+        // --- K iteration 0: load A rows as quads, use .s[0] ---
         {
-            // Load 8 A scalars (one per row)
-            float a0v = pA[0], a1v = pA[1], a2v = pA[2], a3v = pA[3];
-            float a4v = pA[4], a5v = pA[5], a6v = pA[6], a7v = pA[7];
+            float32x4_t ar0 = vld1q_f32(pA);       // rows 0-3
+            float32x4_t ar1 = vld1q_f32(pA + 4);   // rows 4-7
             pA += 8;
 
-            // Load B panel (4 quads = 16 cols)
             float32x4_t b0 = vld1q_f32(pB);
             float32x4_t b1 = vld1q_f32(pB + 4);
             float32x4_t b2 = vld1q_f32(pB + 8);
             float32x4_t b3 = vld1q_f32(pB + 12);
             pB += 16;
 
-            // Rows 0-3: vfmaq_n_f32 broadcasts scalar and does FMLA
-            a00 = vfmaq_n_f32(a00, b0, a0v); a01 = vfmaq_n_f32(a01, b1, a0v);
-            a02 = vfmaq_n_f32(a02, b2, a0v); a03 = vfmaq_n_f32(a03, b3, a0v);
-            a10 = vfmaq_n_f32(a10, b0, a1v); a11 = vfmaq_n_f32(a11, b1, a1v);
-            a12 = vfmaq_n_f32(a12, b2, a1v); a13 = vfmaq_n_f32(a13, b3, a1v);
-            a20 = vfmaq_n_f32(a20, b0, a2v); a21 = vfmaq_n_f32(a21, b1, a2v);
-            a22 = vfmaq_n_f32(a22, b2, a2v); a23 = vfmaq_n_f32(a23, b3, a2v);
-            a30 = vfmaq_n_f32(a30, b0, a3v); a31 = vfmaq_n_f32(a31, b1, a3v);
-            a32 = vfmaq_n_f32(a32, b2, a3v); a33 = vfmaq_n_f32(a33, b3, a3v);
+            // Rows 0-3: use ar0.s[0] for each row
+            a00 = vfmaq_laneq_f32(a00, b0, ar0, 0);
+            a01 = vfmaq_laneq_f32(a01, b1, ar0, 0);
+            a02 = vfmaq_laneq_f32(a02, b2, ar0, 0);
+            a03 = vfmaq_laneq_f32(a03, b3, ar0, 0);
+            a10 = vfmaq_laneq_f32(a10, b0, ar0, 1);
+            a11 = vfmaq_laneq_f32(a11, b1, ar0, 1);
+            a12 = vfmaq_laneq_f32(a12, b2, ar0, 1);
+            a13 = vfmaq_laneq_f32(a13, b3, ar0, 1);
+            a20 = vfmaq_laneq_f32(a20, b0, ar0, 2);
+            a21 = vfmaq_laneq_f32(a21, b1, ar0, 2);
+            a22 = vfmaq_laneq_f32(a22, b2, ar0, 2);
+            a23 = vfmaq_laneq_f32(a23, b3, ar0, 2);
+            a30 = vfmaq_laneq_f32(a30, b0, ar0, 3);
+            a31 = vfmaq_laneq_f32(a31, b1, ar0, 3);
+            a32 = vfmaq_laneq_f32(a32, b2, ar0, 3);
+            a33 = vfmaq_laneq_f32(a33, b3, ar0, 3);
 
-            // Rows 4-7
-            b00 = vfmaq_n_f32(b00, b0, a4v); b01 = vfmaq_n_f32(b01, b1, a4v);
-            b02 = vfmaq_n_f32(b02, b2, a4v); b03 = vfmaq_n_f32(b03, b3, a4v);
-            b10 = vfmaq_n_f32(b10, b0, a5v); b11 = vfmaq_n_f32(b11, b1, a5v);
-            b12 = vfmaq_n_f32(b12, b2, a5v); b13 = vfmaq_n_f32(b13, b3, a5v);
-            b20 = vfmaq_n_f32(b20, b0, a6v); b21 = vfmaq_n_f32(b21, b1, a6v);
-            b22 = vfmaq_n_f32(b22, b2, a6v); b23 = vfmaq_n_f32(b23, b3, a6v);
-            b30 = vfmaq_n_f32(b30, b0, a7v); b31 = vfmaq_n_f32(b31, b1, a7v);
-            b32 = vfmaq_n_f32(b32, b2, a7v); b33 = vfmaq_n_f32(b33, b3, a7v);
+            // Rows 4-7: use ar1.s[0..3]
+            b00 = vfmaq_laneq_f32(b00, b0, ar1, 0);
+            b01 = vfmaq_laneq_f32(b01, b1, ar1, 0);
+            b02 = vfmaq_laneq_f32(b02, b2, ar1, 0);
+            b03 = vfmaq_laneq_f32(b03, b3, ar1, 0);
+            b10 = vfmaq_laneq_f32(b10, b0, ar1, 1);
+            b11 = vfmaq_laneq_f32(b11, b1, ar1, 1);
+            b12 = vfmaq_laneq_f32(b12, b2, ar1, 1);
+            b13 = vfmaq_laneq_f32(b13, b3, ar1, 1);
+            b20 = vfmaq_laneq_f32(b20, b0, ar1, 2);
+            b21 = vfmaq_laneq_f32(b21, b1, ar1, 2);
+            b22 = vfmaq_laneq_f32(b22, b2, ar1, 2);
+            b23 = vfmaq_laneq_f32(b23, b3, ar1, 2);
+            b30 = vfmaq_laneq_f32(b30, b0, ar1, 3);
+            b31 = vfmaq_laneq_f32(b31, b1, ar1, 3);
+            b32 = vfmaq_laneq_f32(b32, b2, ar1, 3);
+            b33 = vfmaq_laneq_f32(b33, b3, ar1, 3);
         }
 
-        // --- K iteration 1 ---
+        // --- K iteration 1: use .s[1] from same A quads ---
         {
-            float a0v = pA[0], a1v = pA[1], a2v = pA[2], a3v = pA[3];
-            float a4v = pA[4], a5v = pA[5], a6v = pA[6], a7v = pA[7];
+            float32x4_t ar0 = vld1q_f32(pA);
+            float32x4_t ar1 = vld1q_f32(pA + 4);
             pA += 8;
 
             float32x4_t b0 = vld1q_f32(pB);
@@ -195,29 +211,45 @@ static void gemm_ukernel_fp32_packed_8x16(
             float32x4_t b3 = vld1q_f32(pB + 12);
             pB += 16;
 
-            a00 = vfmaq_n_f32(a00, b0, a0v); a01 = vfmaq_n_f32(a01, b1, a0v);
-            a02 = vfmaq_n_f32(a02, b2, a0v); a03 = vfmaq_n_f32(a03, b3, a0v);
-            a10 = vfmaq_n_f32(a10, b0, a1v); a11 = vfmaq_n_f32(a11, b1, a1v);
-            a12 = vfmaq_n_f32(a12, b2, a1v); a13 = vfmaq_n_f32(a13, b3, a1v);
-            a20 = vfmaq_n_f32(a20, b0, a2v); a21 = vfmaq_n_f32(a21, b1, a2v);
-            a22 = vfmaq_n_f32(a22, b2, a2v); a23 = vfmaq_n_f32(a23, b3, a2v);
-            a30 = vfmaq_n_f32(a30, b0, a3v); a31 = vfmaq_n_f32(a31, b1, a3v);
-            a32 = vfmaq_n_f32(a32, b2, a3v); a33 = vfmaq_n_f32(a33, b3, a3v);
+            a00 = vfmaq_laneq_f32(a00, b0, ar0, 0);
+            a01 = vfmaq_laneq_f32(a01, b1, ar0, 0);
+            a02 = vfmaq_laneq_f32(a02, b2, ar0, 0);
+            a03 = vfmaq_laneq_f32(a03, b3, ar0, 0);
+            a10 = vfmaq_laneq_f32(a10, b0, ar0, 1);
+            a11 = vfmaq_laneq_f32(a11, b1, ar0, 1);
+            a12 = vfmaq_laneq_f32(a12, b2, ar0, 1);
+            a13 = vfmaq_laneq_f32(a13, b3, ar0, 1);
+            a20 = vfmaq_laneq_f32(a20, b0, ar0, 2);
+            a21 = vfmaq_laneq_f32(a21, b1, ar0, 2);
+            a22 = vfmaq_laneq_f32(a22, b2, ar0, 2);
+            a23 = vfmaq_laneq_f32(a23, b3, ar0, 2);
+            a30 = vfmaq_laneq_f32(a30, b0, ar0, 3);
+            a31 = vfmaq_laneq_f32(a31, b1, ar0, 3);
+            a32 = vfmaq_laneq_f32(a32, b2, ar0, 3);
+            a33 = vfmaq_laneq_f32(a33, b3, ar0, 3);
 
-            b00 = vfmaq_n_f32(b00, b0, a4v); b01 = vfmaq_n_f32(b01, b1, a4v);
-            b02 = vfmaq_n_f32(b02, b2, a4v); b03 = vfmaq_n_f32(b03, b3, a4v);
-            b10 = vfmaq_n_f32(b10, b0, a5v); b11 = vfmaq_n_f32(b11, b1, a5v);
-            b12 = vfmaq_n_f32(b12, b2, a5v); b13 = vfmaq_n_f32(b13, b3, a5v);
-            b20 = vfmaq_n_f32(b20, b0, a6v); b21 = vfmaq_n_f32(b21, b1, a6v);
-            b22 = vfmaq_n_f32(b22, b2, a6v); b23 = vfmaq_n_f32(b23, b3, a6v);
-            b30 = vfmaq_n_f32(b30, b0, a7v); b31 = vfmaq_n_f32(b31, b1, a7v);
-            b32 = vfmaq_n_f32(b32, b2, a7v); b33 = vfmaq_n_f32(b33, b3, a7v);
+            b00 = vfmaq_laneq_f32(b00, b0, ar1, 0);
+            b01 = vfmaq_laneq_f32(b01, b1, ar1, 0);
+            b02 = vfmaq_laneq_f32(b02, b2, ar1, 0);
+            b03 = vfmaq_laneq_f32(b03, b3, ar1, 0);
+            b10 = vfmaq_laneq_f32(b10, b0, ar1, 1);
+            b11 = vfmaq_laneq_f32(b11, b1, ar1, 1);
+            b12 = vfmaq_laneq_f32(b12, b2, ar1, 1);
+            b13 = vfmaq_laneq_f32(b13, b3, ar1, 1);
+            b20 = vfmaq_laneq_f32(b20, b0, ar1, 2);
+            b21 = vfmaq_laneq_f32(b21, b1, ar1, 2);
+            b22 = vfmaq_laneq_f32(b22, b2, ar1, 2);
+            b23 = vfmaq_laneq_f32(b23, b3, ar1, 2);
+            b30 = vfmaq_laneq_f32(b30, b0, ar1, 3);
+            b31 = vfmaq_laneq_f32(b31, b1, ar1, 3);
+            b32 = vfmaq_laneq_f32(b32, b2, ar1, 3);
+            b33 = vfmaq_laneq_f32(b33, b3, ar1, 3);
         }
 
         // --- K iteration 2 ---
         {
-            float a0v = pA[0], a1v = pA[1], a2v = pA[2], a3v = pA[3];
-            float a4v = pA[4], a5v = pA[5], a6v = pA[6], a7v = pA[7];
+            float32x4_t ar0 = vld1q_f32(pA);
+            float32x4_t ar1 = vld1q_f32(pA + 4);
             pA += 8;
 
             float32x4_t b0 = vld1q_f32(pB);
@@ -226,29 +258,45 @@ static void gemm_ukernel_fp32_packed_8x16(
             float32x4_t b3 = vld1q_f32(pB + 12);
             pB += 16;
 
-            a00 = vfmaq_n_f32(a00, b0, a0v); a01 = vfmaq_n_f32(a01, b1, a0v);
-            a02 = vfmaq_n_f32(a02, b2, a0v); a03 = vfmaq_n_f32(a03, b3, a0v);
-            a10 = vfmaq_n_f32(a10, b0, a1v); a11 = vfmaq_n_f32(a11, b1, a1v);
-            a12 = vfmaq_n_f32(a12, b2, a1v); a13 = vfmaq_n_f32(a13, b3, a1v);
-            a20 = vfmaq_n_f32(a20, b0, a2v); a21 = vfmaq_n_f32(a21, b1, a2v);
-            a22 = vfmaq_n_f32(a22, b2, a2v); a23 = vfmaq_n_f32(a23, b3, a2v);
-            a30 = vfmaq_n_f32(a30, b0, a3v); a31 = vfmaq_n_f32(a31, b1, a3v);
-            a32 = vfmaq_n_f32(a32, b2, a3v); a33 = vfmaq_n_f32(a33, b3, a3v);
+            a00 = vfmaq_laneq_f32(a00, b0, ar0, 0);
+            a01 = vfmaq_laneq_f32(a01, b1, ar0, 0);
+            a02 = vfmaq_laneq_f32(a02, b2, ar0, 0);
+            a03 = vfmaq_laneq_f32(a03, b3, ar0, 0);
+            a10 = vfmaq_laneq_f32(a10, b0, ar0, 1);
+            a11 = vfmaq_laneq_f32(a11, b1, ar0, 1);
+            a12 = vfmaq_laneq_f32(a12, b2, ar0, 1);
+            a13 = vfmaq_laneq_f32(a13, b3, ar0, 1);
+            a20 = vfmaq_laneq_f32(a20, b0, ar0, 2);
+            a21 = vfmaq_laneq_f32(a21, b1, ar0, 2);
+            a22 = vfmaq_laneq_f32(a22, b2, ar0, 2);
+            a23 = vfmaq_laneq_f32(a23, b3, ar0, 2);
+            a30 = vfmaq_laneq_f32(a30, b0, ar0, 3);
+            a31 = vfmaq_laneq_f32(a31, b1, ar0, 3);
+            a32 = vfmaq_laneq_f32(a32, b2, ar0, 3);
+            a33 = vfmaq_laneq_f32(a33, b3, ar0, 3);
 
-            b00 = vfmaq_n_f32(b00, b0, a4v); b01 = vfmaq_n_f32(b01, b1, a4v);
-            b02 = vfmaq_n_f32(b02, b2, a4v); b03 = vfmaq_n_f32(b03, b3, a4v);
-            b10 = vfmaq_n_f32(b10, b0, a5v); b11 = vfmaq_n_f32(b11, b1, a5v);
-            b12 = vfmaq_n_f32(b12, b2, a5v); b13 = vfmaq_n_f32(b13, b3, a5v);
-            b20 = vfmaq_n_f32(b20, b0, a6v); b21 = vfmaq_n_f32(b21, b1, a6v);
-            b22 = vfmaq_n_f32(b22, b2, a6v); b23 = vfmaq_n_f32(b23, b3, a6v);
-            b30 = vfmaq_n_f32(b30, b0, a7v); b31 = vfmaq_n_f32(b31, b1, a7v);
-            b32 = vfmaq_n_f32(b32, b2, a7v); b33 = vfmaq_n_f32(b33, b3, a7v);
+            b00 = vfmaq_laneq_f32(b00, b0, ar1, 0);
+            b01 = vfmaq_laneq_f32(b01, b1, ar1, 0);
+            b02 = vfmaq_laneq_f32(b02, b2, ar1, 0);
+            b03 = vfmaq_laneq_f32(b03, b3, ar1, 0);
+            b10 = vfmaq_laneq_f32(b10, b0, ar1, 1);
+            b11 = vfmaq_laneq_f32(b11, b1, ar1, 1);
+            b12 = vfmaq_laneq_f32(b12, b2, ar1, 1);
+            b13 = vfmaq_laneq_f32(b13, b3, ar1, 1);
+            b20 = vfmaq_laneq_f32(b20, b0, ar1, 2);
+            b21 = vfmaq_laneq_f32(b21, b1, ar1, 2);
+            b22 = vfmaq_laneq_f32(b22, b2, ar1, 2);
+            b23 = vfmaq_laneq_f32(b23, b3, ar1, 2);
+            b30 = vfmaq_laneq_f32(b30, b0, ar1, 3);
+            b31 = vfmaq_laneq_f32(b31, b1, ar1, 3);
+            b32 = vfmaq_laneq_f32(b32, b2, ar1, 3);
+            b33 = vfmaq_laneq_f32(b33, b3, ar1, 3);
         }
 
         // --- K iteration 3 ---
         {
-            float a0v = pA[0], a1v = pA[1], a2v = pA[2], a3v = pA[3];
-            float a4v = pA[4], a5v = pA[5], a6v = pA[6], a7v = pA[7];
+            float32x4_t ar0 = vld1q_f32(pA);
+            float32x4_t ar1 = vld1q_f32(pA + 4);
             pA += 8;
 
             float32x4_t b0 = vld1q_f32(pB);
@@ -257,30 +305,46 @@ static void gemm_ukernel_fp32_packed_8x16(
             float32x4_t b3 = vld1q_f32(pB + 12);
             pB += 16;
 
-            a00 = vfmaq_n_f32(a00, b0, a0v); a01 = vfmaq_n_f32(a01, b1, a0v);
-            a02 = vfmaq_n_f32(a02, b2, a0v); a03 = vfmaq_n_f32(a03, b3, a0v);
-            a10 = vfmaq_n_f32(a10, b0, a1v); a11 = vfmaq_n_f32(a11, b1, a1v);
-            a12 = vfmaq_n_f32(a12, b2, a1v); a13 = vfmaq_n_f32(a13, b3, a1v);
-            a20 = vfmaq_n_f32(a20, b0, a2v); a21 = vfmaq_n_f32(a21, b1, a2v);
-            a22 = vfmaq_n_f32(a22, b2, a2v); a23 = vfmaq_n_f32(a23, b3, a2v);
-            a30 = vfmaq_n_f32(a30, b0, a3v); a31 = vfmaq_n_f32(a31, b1, a3v);
-            a32 = vfmaq_n_f32(a32, b2, a3v); a33 = vfmaq_n_f32(a33, b3, a3v);
+            a00 = vfmaq_laneq_f32(a00, b0, ar0, 0);
+            a01 = vfmaq_laneq_f32(a01, b1, ar0, 0);
+            a02 = vfmaq_laneq_f32(a02, b2, ar0, 0);
+            a03 = vfmaq_laneq_f32(a03, b3, ar0, 0);
+            a10 = vfmaq_laneq_f32(a10, b0, ar0, 1);
+            a11 = vfmaq_laneq_f32(a11, b1, ar0, 1);
+            a12 = vfmaq_laneq_f32(a12, b2, ar0, 1);
+            a13 = vfmaq_laneq_f32(a13, b3, ar0, 1);
+            a20 = vfmaq_laneq_f32(a20, b0, ar0, 2);
+            a21 = vfmaq_laneq_f32(a21, b1, ar0, 2);
+            a22 = vfmaq_laneq_f32(a22, b2, ar0, 2);
+            a23 = vfmaq_laneq_f32(a23, b3, ar0, 2);
+            a30 = vfmaq_laneq_f32(a30, b0, ar0, 3);
+            a31 = vfmaq_laneq_f32(a31, b1, ar0, 3);
+            a32 = vfmaq_laneq_f32(a32, b2, ar0, 3);
+            a33 = vfmaq_laneq_f32(a33, b3, ar0, 3);
 
-            b00 = vfmaq_n_f32(b00, b0, a4v); b01 = vfmaq_n_f32(b01, b1, a4v);
-            b02 = vfmaq_n_f32(b02, b2, a4v); b03 = vfmaq_n_f32(b03, b3, a4v);
-            b10 = vfmaq_n_f32(b10, b0, a5v); b11 = vfmaq_n_f32(b11, b1, a5v);
-            b12 = vfmaq_n_f32(b12, b2, a5v); b13 = vfmaq_n_f32(b13, b3, a5v);
-            b20 = vfmaq_n_f32(b20, b0, a6v); b21 = vfmaq_n_f32(b21, b1, a6v);
-            b22 = vfmaq_n_f32(b22, b2, a6v); b23 = vfmaq_n_f32(b23, b3, a6v);
-            b30 = vfmaq_n_f32(b30, b0, a7v); b31 = vfmaq_n_f32(b31, b1, a7v);
-            b32 = vfmaq_n_f32(b32, b2, a7v); b33 = vfmaq_n_f32(b33, b3, a7v);
+            b00 = vfmaq_laneq_f32(b00, b0, ar1, 0);
+            b01 = vfmaq_laneq_f32(b01, b1, ar1, 0);
+            b02 = vfmaq_laneq_f32(b02, b2, ar1, 0);
+            b03 = vfmaq_laneq_f32(b03, b3, ar1, 0);
+            b10 = vfmaq_laneq_f32(b10, b0, ar1, 1);
+            b11 = vfmaq_laneq_f32(b11, b1, ar1, 1);
+            b12 = vfmaq_laneq_f32(b12, b2, ar1, 1);
+            b13 = vfmaq_laneq_f32(b13, b3, ar1, 1);
+            b20 = vfmaq_laneq_f32(b20, b0, ar1, 2);
+            b21 = vfmaq_laneq_f32(b21, b1, ar1, 2);
+            b22 = vfmaq_laneq_f32(b22, b2, ar1, 2);
+            b23 = vfmaq_laneq_f32(b23, b3, ar1, 2);
+            b30 = vfmaq_laneq_f32(b30, b0, ar1, 3);
+            b31 = vfmaq_laneq_f32(b31, b1, ar1, 3);
+            b32 = vfmaq_laneq_f32(b32, b2, ar1, 3);
+            b33 = vfmaq_laneq_f32(b33, b3, ar1, 3);
         }
     }
 
     // K tail: 1 at a time
     for (; k < K; ++k) {
-        float a0v = pA[0], a1v = pA[1], a2v = pA[2], a3v = pA[3];
-        float a4v = pA[4], a5v = pA[5], a6v = pA[6], a7v = pA[7];
+        float32x4_t ar0 = vld1q_f32(pA);
+        float32x4_t ar1 = vld1q_f32(pA + 4);
         pA += 8;
 
         float32x4_t b0 = vld1q_f32(pB);
@@ -289,25 +353,41 @@ static void gemm_ukernel_fp32_packed_8x16(
         float32x4_t b3 = vld1q_f32(pB + 12);
         pB += 16;
 
-        // Rows 0-3
-        a00 = vfmaq_n_f32(a00, b0, a0v); a01 = vfmaq_n_f32(a01, b1, a0v);
-        a02 = vfmaq_n_f32(a02, b2, a0v); a03 = vfmaq_n_f32(a03, b3, a0v);
-        a10 = vfmaq_n_f32(a10, b0, a1v); a11 = vfmaq_n_f32(a11, b1, a1v);
-        a12 = vfmaq_n_f32(a12, b2, a1v); a13 = vfmaq_n_f32(a13, b3, a1v);
-        a20 = vfmaq_n_f32(a20, b0, a2v); a21 = vfmaq_n_f32(a21, b1, a2v);
-        a22 = vfmaq_n_f32(a22, b2, a2v); a23 = vfmaq_n_f32(a23, b3, a2v);
-        a30 = vfmaq_n_f32(a30, b0, a3v); a31 = vfmaq_n_f32(a31, b1, a3v);
-        a32 = vfmaq_n_f32(a32, b2, a3v); a33 = vfmaq_n_f32(a33, b3, a3v);
+        // Rows 0-3: use ar0.s[0..3] for each row
+        a00 = vfmaq_laneq_f32(a00, b0, ar0, 0);
+        a01 = vfmaq_laneq_f32(a01, b1, ar0, 0);
+        a02 = vfmaq_laneq_f32(a02, b2, ar0, 0);
+        a03 = vfmaq_laneq_f32(a03, b3, ar0, 0);
+        a10 = vfmaq_laneq_f32(a10, b0, ar0, 1);
+        a11 = vfmaq_laneq_f32(a11, b1, ar0, 1);
+        a12 = vfmaq_laneq_f32(a12, b2, ar0, 1);
+        a13 = vfmaq_laneq_f32(a13, b3, ar0, 1);
+        a20 = vfmaq_laneq_f32(a20, b0, ar0, 2);
+        a21 = vfmaq_laneq_f32(a21, b1, ar0, 2);
+        a22 = vfmaq_laneq_f32(a22, b2, ar0, 2);
+        a23 = vfmaq_laneq_f32(a23, b3, ar0, 2);
+        a30 = vfmaq_laneq_f32(a30, b0, ar0, 3);
+        a31 = vfmaq_laneq_f32(a31, b1, ar0, 3);
+        a32 = vfmaq_laneq_f32(a32, b2, ar0, 3);
+        a33 = vfmaq_laneq_f32(a33, b3, ar0, 3);
 
-        // Rows 4-7
-        b00 = vfmaq_n_f32(b00, b0, a4v); b01 = vfmaq_n_f32(b01, b1, a4v);
-        b02 = vfmaq_n_f32(b02, b2, a4v); b03 = vfmaq_n_f32(b03, b3, a4v);
-        b10 = vfmaq_n_f32(b10, b0, a5v); b11 = vfmaq_n_f32(b11, b1, a5v);
-        b12 = vfmaq_n_f32(b12, b2, a5v); b13 = vfmaq_n_f32(b13, b3, a5v);
-        b20 = vfmaq_n_f32(b20, b0, a6v); b21 = vfmaq_n_f32(b21, b1, a6v);
-        b22 = vfmaq_n_f32(b22, b2, a6v); b23 = vfmaq_n_f32(b23, b3, a6v);
-        b30 = vfmaq_n_f32(b30, b0, a7v); b31 = vfmaq_n_f32(b31, b1, a7v);
-        b32 = vfmaq_n_f32(b32, b2, a7v); b33 = vfmaq_n_f32(b33, b3, a7v);
+        // Rows 4-7: use ar1.s[0..3] for each row
+        b00 = vfmaq_laneq_f32(b00, b0, ar1, 0);
+        b01 = vfmaq_laneq_f32(b01, b1, ar1, 0);
+        b02 = vfmaq_laneq_f32(b02, b2, ar1, 0);
+        b03 = vfmaq_laneq_f32(b03, b3, ar1, 0);
+        b10 = vfmaq_laneq_f32(b10, b0, ar1, 1);
+        b11 = vfmaq_laneq_f32(b11, b1, ar1, 1);
+        b12 = vfmaq_laneq_f32(b12, b2, ar1, 1);
+        b13 = vfmaq_laneq_f32(b13, b3, ar1, 1);
+        b20 = vfmaq_laneq_f32(b20, b0, ar1, 2);
+        b21 = vfmaq_laneq_f32(b21, b1, ar1, 2);
+        b22 = vfmaq_laneq_f32(b22, b2, ar1, 2);
+        b23 = vfmaq_laneq_f32(b23, b3, ar1, 2);
+        b30 = vfmaq_laneq_f32(b30, b0, ar1, 3);
+        b31 = vfmaq_laneq_f32(b31, b1, ar1, 3);
+        b32 = vfmaq_laneq_f32(b32, b2, ar1, 3);
+        b33 = vfmaq_laneq_f32(b33, b3, ar1, 3);
     }
 
     // ================================================================
