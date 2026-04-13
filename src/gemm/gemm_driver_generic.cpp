@@ -195,7 +195,12 @@ void gemm_driver_generic(int M, int N, int K,
                                 cfg.ukernel(kc_padded, A_panel, B_panel,
                                            C_ptr, ldc, alpha_eff, beta_eff, extra);
                             } else {
-                                std::fill(my_edge_buf.begin(), my_edge_buf.end(), 0.0f);
+                                // Edge tile: compute into buffer, copy valid portion.
+                                // No memset needed — the kernel writes ALL Mr×Nr
+                                // elements regardless (beta=0 overwrites; beta!=0
+                                // reads+writes). Rows beyond m_rem get zero-padded
+                                // A so their output is zero, and we only copy the
+                                // first m_rem rows back to C.
                                 if (beta_eff != 0.0f) {
                                     for (int i = 0; i < m_rem; ++i)
                                         memcpy(&my_edge_buf[i * Nr], &C_ptr[i * ldc],

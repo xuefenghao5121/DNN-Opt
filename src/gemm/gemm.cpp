@@ -59,11 +59,13 @@ void gemm_naive_fp32(int M, int N, int K,
 
 /// Dispatch via registry + generic driver.
 /// Returns true if handled, false if caller should use legacy path.
+/// When allow_m_pad=true, accepts kernels where M < Mr (zero-pads via edge_bufs).
 bool dispatch_via_registry(GemmDataType dtype,
                            int M, int N, int K,
                            float alpha, const float* A, int lda,
                            const float* B, int ldb,
-                           float beta, float* C, int ldc) {
+                           float beta, float* C, int ldc,
+                           bool allow_m_pad = false) {
     const auto& hw = detect_arm_hwcaps();
     const auto& profile = get_autotuned_profile();
 
@@ -73,8 +75,12 @@ bool dispatch_via_registry(GemmDataType dtype,
         int Nr = desc->nr_is_vla ? desc->compute_nr(hw.sve_vector_bits) : desc->Nr;
         int Mr = desc->Mr;
 
-        // Small-M: try next smaller kernel
-        if (M < Mr) continue;
+        // Skip if M < Mr unless M-padding is explicitly allowed.
+        // M-padding is wasteful for very small M but reasonable when M is close to Mr
+        // (e.g., M=6 with Mr=8 wastes only 25% compute but gains packed B-panel reuse).
+        if (M < Mr && !allow_m_pad) continue;
+        // When M-padding, only accept kernels where M >= Mr/2 to avoid excessive waste.
+        if (M < Mr && M * 2 < Mr) continue;
 
         auto bp = compute_blocking_params(hw, profile, Mr, Nr, desc->Kgroup,
                                           desc->packed_a_elem_bytes,
@@ -154,15 +160,27 @@ void gemm_fp32(int M, int N, int K,
             // Phase 13: For M=4 with very large N*K, use packed registry path.
             // This enables 2D threading + huge pages, which outperforms small-M
             // wide driver for shapes like batch4-LLM (4×4096×4096).
-            // M=5,6,7: fall through to adaptive tile (threaded) instead.
             constexpr int64_t kLargeNKThreshold = 4 * 1024 * 1024;
             if (M == 4 && (int64_t)N * K > kLargeNKThreshold) {
                 // Fall through to registry dispatch (packed + threaded)
                 goto registry_dispatch;
             }
-            // M=5-7 with large N*K: use adaptive tile (now OpenMP-threaded)
+            // Phase 13I: M=6 with large N*K — use packed registry path.
+            // 8x16 kernel with M-padding (6→8 rows) outperforms the adaptive tile
+            // path for large shapes because packed B gives sequential access while
+            // adaptive tile reads B with stride N (cache thrash for large K).
+            // The 25% compute waste from 2 extra rows is compensated by better
+            // cache utilization and the 8x16 kernel's higher compute density.
+            if (M == 6 && (int64_t)N * K > kLargeNKThreshold) {
+                if (dispatch_via_registry(GemmDataType::kFP32, M, N, K,
+                                          alpha, A, lda, B, ldb, beta, C, ldc,
+                                          /*allow_m_pad=*/true))
+                    return;
+                // If registry failed, fall through to adaptive tile
+            }
+            // M=5,7 with large N*K: use adaptive tile (now OpenMP-threaded)
             // rather than wide driver (single-threaded).
-            if (M >= 5 && (int64_t)N * K > kLargeNKThreshold) {
+            if ((M == 5 || M == 7) && (int64_t)N * K > kLargeNKThreshold) {
                 // Fall through to adaptive tile path below
             } else
             // M=2-7: use wide driver for N >= 48 (macro-tiling benefit).

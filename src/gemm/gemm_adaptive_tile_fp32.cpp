@@ -550,52 +550,109 @@ static constexpr int kNumTileDispatch =
 // M-tail handler (stack-backed accumulators for <Mr rows)
 // ============================================================
 
+/// Load B narrow: load exactly N floats into a float32x4_t, zero-pad unused lanes.
+/// Uses scalar array to avoid Clang's vsetq_lane_f32 constant-index restriction.
+template<int N>
+static inline float32x4_t load_b_narrow_tail(const float* ptr) {
+    float vals[4] = {0, 0, 0, 0};
+    if (N >= 1) vals[0] = ptr[0];
+    if (N >= 2) vals[1] = ptr[1];
+    if (N >= 3) vals[2] = ptr[2];
+    if (N >= 4) vals[3] = ptr[3];
+    return vld1q_f32(vals);
+}
+
+/// Partial store: store exactly N floats from a float32x4_t.
+template<int N>
+static inline void store_narrow(float* ptr, float32x4_t vec) {
+    float tmp[4];
+    vst1q_f32(tmp, vec);
+    if (N >= 1) ptr[0] = tmp[0];
+    if (N >= 2) ptr[1] = tmp[1];
+    if (N >= 3) ptr[2] = tmp[2];
+}
+
+/// Fully vectorized tail kernel: all columns accumulated with NEON,
+/// no scalar K-loop fallback. Handles arbitrary M and N (1..15).
 static void gemm_tile_tail(int M, int N, int K,
                             float alpha, const float* A, int lda,
                             const float* B, int ldb,
                             float beta, float* C, int ldc) {
-    int sub_full4 = (N / 4) * 4;
-    int n_acc = (N + 3) / 4;
+    int n_quads = (N + 3) / 4;  // total quads needed (last may be partial)
+    int full_quads = N / 4;      // fully populated quads
+    int n_rem = N - full_quads * 4;  // remaining columns in last quad
+
     float32x4_t* acc = reinterpret_cast<float32x4_t*>(
-        __builtin_alloca(M * n_acc * sizeof(float32x4_t)));
-    for (int x = 0; x < M * n_acc; x++) acc[x] = vdupq_n_f32(0);
+        __builtin_alloca(M * n_quads * sizeof(float32x4_t)));
+    for (int x = 0; x < M * n_quads; x++) acc[x] = vdupq_n_f32(0);
 
     for (int k = 0; k < K; ++k) {
-        // Prefetch B row k+8 into L1
         if (k + 8 < K) {
             const float* bk_pf = B + (k + 8) * ldb;
             __asm__ volatile("prfm pldl1keep, [%0]" : : "r"(bk_pf) : "memory");
         }
 
         const float* bk = B + k * ldb;
-        for (int j = 0; j < sub_full4; j += 4) {
-            float32x4_t bv = vld1q_f32(bk + j);
-            int aidx = j / 4;
+
+        // Fully populated B quads
+        for (int q = 0; q < full_quads; ++q) {
+            float32x4_t bv = vld1q_f32(bk + q * 4);
             for (int i = 0; i < M; ++i) {
-                acc[i * n_acc + aidx] = vfmaq_n_f32(
-                    acc[i * n_acc + aidx], bv, A[i * lda + k]);
+                acc[i * n_quads + q] = vfmaq_n_f32(
+                    acc[i * n_quads + q], bv, A[i * lda + k]);
+            }
+        }
+
+        // Last partial B quad (n_rem columns, zero-padded)
+        if (n_rem > 0) {
+            float32x4_t bv;
+            switch (n_rem) {
+            case 1: bv = load_b_narrow_tail<1>(bk + full_quads * 4); break;
+            case 2: bv = load_b_narrow_tail<2>(bk + full_quads * 4); break;
+            case 3: bv = load_b_narrow_tail<3>(bk + full_quads * 4); break;
+            default: bv = vdupq_n_f32(0); break;
+            }
+            for (int i = 0; i < M; ++i) {
+                acc[i * n_quads + full_quads] = vfmaq_n_f32(
+                    acc[i * n_quads + full_quads], bv, A[i * lda + k]);
             }
         }
     }
 
+    // Store results
     float32x4_t av = vdupq_n_f32(alpha);
+    float32x4_t bvv = vdupq_n_f32(beta);
     bool beta_zero = (beta == 0.0f);
+
     for (int i = 0; i < M; ++i) {
         float* cr = C + i * ldc;
-        for (int j = 0; j < sub_full4; j += 4) {
-            int aidx = j / 4;
-            float32x4_t s = vmulq_f32(av, acc[i * n_acc + aidx]);
-            if (!beta_zero) {
-                float32x4_t bvv = vdupq_n_f32(beta);
-                s = vfmaq_f32(s, bvv, vld1q_f32(cr + j));
-            }
-            vst1q_f32(cr + j, s);
+
+        // Store fully populated quads
+        for (int q = 0; q < full_quads; ++q) {
+            float32x4_t s = vmulq_f32(av, acc[i * n_quads + q]);
+            if (!beta_zero)
+                s = vfmaq_f32(s, bvv, vld1q_f32(cr + q * 4));
+            vst1q_f32(cr + q * 4, s);
         }
-        for (int j = sub_full4; j < N; ++j) {
-            float sum = 0.0f;
-            for (int k = 0; k < K; ++k)
-                sum += A[i * lda + k] * B[k * ldb + j];
-            cr[j] = beta_zero ? alpha * sum : alpha * sum + beta * cr[j];
+
+        // Store last partial quad
+        if (n_rem > 0) {
+            float32x4_t s = vmulq_f32(av, acc[i * n_quads + full_quads]);
+            if (!beta_zero) {
+                float32x4_t old;
+                switch (n_rem) {
+                case 1: old = load_b_narrow_tail<1>(cr + full_quads * 4); break;
+                case 2: old = load_b_narrow_tail<2>(cr + full_quads * 4); break;
+                case 3: old = load_b_narrow_tail<3>(cr + full_quads * 4); break;
+                default: old = vdupq_n_f32(0); break;
+                }
+                s = vfmaq_f32(s, bvv, old);
+            }
+            switch (n_rem) {
+            case 1: store_narrow<1>(cr + full_quads * 4, s); break;
+            case 2: store_narrow<2>(cr + full_quads * 4, s); break;
+            case 3: store_narrow<3>(cr + full_quads * 4, s); break;
+            }
         }
     }
 }
