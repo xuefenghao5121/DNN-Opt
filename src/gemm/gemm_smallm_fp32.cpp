@@ -459,69 +459,46 @@ static void gemm_smallm1_fp32(int N, int K,
                                float beta, float* C, int ldc) {
     (void)lda; (void)ldc;  // M=1, stride not needed
 
-    constexpr int kPanelN = 128;
-    // Kc blocking: target B[Kc][panelN] fits L1D.
-    // L1D=64KB, panelN=128: Kc = 64KB / (128*4) = 128.
-    constexpr int kKc = 128;
+    // Process N in panels of 48 columns using the optimized 1x48 kernel
+    // (12 named accumulators, 4x K-unrolling, no register spills).
+    // The 1x48 kernel always processes exactly 48 columns — only use for full panels.
 
-    for (int j0 = 0; j0 < N; j0 += kPanelN) {
-        int j_len = std::min(kPanelN, N - j0);
-        int j_full4 = (j_len / 4) * 4;
-
-        // 32 accumulators for 128 floats — persist across Kc blocks
-        float32x4_t acc[32];
-        for (int i = 0; i < 32; ++i) acc[i] = vdupq_n_f32(0);
-
-        // Kc blocking: process K in cache-friendly chunks
-        for (int pc = 0; pc < K; pc += kKc) {
-            int kc = std::min(kKc, K - pc);
-
-            // 2x K-unrolled main loop within this Kc block
-            int k = 0;
-            for (; k + 1 < kc; k += 2) {
-                float ak0 = A[pc + k], ak1 = A[pc + k + 1];
-                float32x4_t av0 = vdupq_n_f32(ak0);
-                float32x4_t av1 = vdupq_n_f32(ak1);
-                const float* bk0 = B + (pc + k) * ldb + j0;
-                const float* bk1 = B + (pc + k + 1) * ldb + j0;
-
-                for (int j = 0; j < j_full4; j += 4) {
-                    int idx = j / 4;
-                    acc[idx] = vfmaq_f32(acc[idx], av0, vld1q_f32(bk0 + j));
-                    acc[idx] = vfmaq_f32(acc[idx], av1, vld1q_f32(bk1 + j));
-                }
-            }
-            // K tail within this Kc block
-            if (k < kc) {
-                float ak = A[pc + k];
-                float32x4_t av = vdupq_n_f32(ak);
-                const float* bk = B + (pc + k) * ldb + j0;
-                for (int j = 0; j < j_full4; j += 4) {
-                    int idx = j / 4;
-                    acc[idx] = vfmaq_f32(acc[idx], av, vld1q_f32(bk + j));
-                }
-            }
+    // For large shapes, parallelize N-panels across threads (embarrassingly parallel:
+    // each panel writes to independent C[j0..j0+47] with no overlap).
+    int64_t flops = (int64_t)2 * N * K;
+#ifdef _OPENMP
+    int n_threads = 1;
+    if (flops > 200000) {  // 200K FLOPS threshold for threading
+        #pragma omp parallel
+        {
+            #pragma omp single
+            n_threads = omp_get_num_threads();
         }
+    }
+    if (n_threads > 1 && N >= kSmallMNr * n_threads) {
+        // Parallel path: each thread gets a range of N-panels
+        #pragma omp parallel for schedule(static)
+        for (int j0 = 0; j0 + kSmallMNr <= N; j0 += kSmallMNr) {
+            gemm_ukernel_fp32_1x48(K, A, B + j0, ldb, C + j0,
+                                    alpha, beta, /*packed=*/false);
+        }
+        // Handle remaining columns in single thread
+        int j0 = (N / kSmallMNr) * kSmallMNr;
+        if (j0 < N) {
+            gemm_neon_1xn(K, N - j0, A, B + j0, ldb, C + j0, alpha, beta);
+        }
+        return;
+    }
+#endif
 
-        // Store
-        float32x4_t av = vdupq_n_f32(alpha);
-        float32x4_t bv = vdupq_n_f32(beta);
-        for (int j = 0; j < j_full4; j += 4) {
-            int idx = j / 4;
-            if (beta == 0.0f) {
-                vst1q_f32(C + j0 + j, vmulq_f32(av, acc[idx]));
-            } else {
-                vst1q_f32(C + j0 + j, vfmaq_f32(vmulq_f32(bv, vld1q_f32(C + j0 + j)), av, acc[idx]));
-            }
-        }
-        // Scalar tail
-        for (int j = j_full4; j < j_len; ++j) {
-            float sum = 0.0f;
-            for (int k2 = 0; k2 < K; ++k2) {
-                sum += A[k2] * B[k2 * ldb + j0 + j];
-            }
-            C[j0 + j] = (beta == 0.0f) ? alpha * sum : alpha * sum + beta * C[j0 + j];
-        }
+    // Single-threaded path
+    int j0 = 0;
+    for (; j0 + kSmallMNr <= N; j0 += kSmallMNr) {
+        gemm_ukernel_fp32_1x48(K, A, B + j0, ldb, C + j0,
+                                alpha, beta, /*packed=*/false);
+    }
+    if (j0 < N) {
+        gemm_neon_1xn(K, N - j0, A, B + j0, ldb, C + j0, alpha, beta);
     }
 }
 
