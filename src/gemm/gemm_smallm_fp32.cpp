@@ -444,6 +444,132 @@ static void gemm_ukernel_fp32_4xN(int N, int K,
 }
 
 // ============================================================
+// K-major GEMV: sequential B row access for bandwidth efficiency
+// ============================================================
+
+/// K-major GEMV for large K with strided B access.
+///
+/// Instead of processing N in small panels (strided B reads with 44KB jumps),
+/// sweeps all N columns per K iteration. Each B[k*ldb + 0:N-1] row is read
+/// sequentially, allowing the HW stream prefetcher to sustain full DRAM bandwidth.
+///
+/// Uses a temp buffer (N floats) for accumulators, which stays in cache
+/// while B rows stream through L1D.
+///
+/// Single-threaded version. Call with N-column range for parallel case.
+static void gemm_gemv_kmajor_st(int N, int K,
+                                  const float* A,
+                                  const float* B, int ldb, int j_offset,
+                                  float alpha, float beta,
+                                  float* C) {
+    // Stack buffer: up to 8192 floats = 32KB (fits L1D)
+    constexpr int kMaxStackN = 8192;
+    float temp_stack[kMaxStackN];
+    float* temp = (N <= kMaxStackN) ? temp_stack : new float[N];
+
+    // Zero-init temp
+    std::memset(temp, 0, N * sizeof(float));
+
+    // 4x K-unrolled K-major sweep.
+    // Key optimization: accumulate 4 B rows into temp before write-back,
+    // reducing temp memory traffic by 4x (1 load+store per 4 FMAs vs 1 per 1).
+    // Also enables better pipelining: 4 independent FMLA chains overlap with loads.
+    int k = 0;
+    for (; k + 3 < K; k += 4) {
+        float a0 = A[k], a1 = A[k + 1], a2 = A[k + 2], a3 = A[k + 3];
+        float32x4_t a0v = vdupq_n_f32(a0);
+        float32x4_t a1v = vdupq_n_f32(a1);
+        float32x4_t a2v = vdupq_n_f32(a2);
+        float32x4_t a3v = vdupq_n_f32(a3);
+
+        const float* bk0 = B + k * ldb + j_offset;
+        const float* bk1 = B + (k + 1) * ldb + j_offset;
+        const float* bk2 = B + (k + 2) * ldb + j_offset;
+        const float* bk3 = B + (k + 3) * ldb + j_offset;
+
+        int j = 0;
+        for (; j + 3 < N; j += 4) {
+            float32x4_t t = vld1q_f32(temp + j);
+            t = vfmaq_f32(t, a0v, vld1q_f32(bk0 + j));
+            t = vfmaq_f32(t, a1v, vld1q_f32(bk1 + j));
+            t = vfmaq_f32(t, a2v, vld1q_f32(bk2 + j));
+            t = vfmaq_f32(t, a3v, vld1q_f32(bk3 + j));
+            vst1q_f32(temp + j, t);
+        }
+        // Scalar tail
+        for (; j < N; ++j)
+            temp[j] += a0 * bk0[j] + a1 * bk1[j] + a2 * bk2[j] + a3 * bk3[j];
+    }
+    // K tail: single iteration at a time
+    for (; k < K; ++k) {
+        float ak = A[k];
+        float32x4_t av = vdupq_n_f32(ak);
+        const float* bk = B + k * ldb + j_offset;
+
+        int j = 0;
+        for (; j + 3 < N; j += 4) {
+            float32x4_t t = vld1q_f32(temp + j);
+            t = vfmaq_f32(t, av, vld1q_f32(bk + j));
+            vst1q_f32(temp + j, t);
+        }
+        for (; j < N; ++j)
+            temp[j] += ak * bk[j];
+    }
+
+    // Epilogue: C = alpha * temp + beta * C
+    float32x4_t alv = vdupq_n_f32(alpha);
+    int j = 0;
+    if (beta == 0.0f) {
+        for (; j + 3 < N; j += 4)
+            vst1q_f32(C + j, vmulq_f32(alv, vld1q_f32(temp + j)));
+    } else {
+        float32x4_t bv = vdupq_n_f32(beta);
+        for (; j + 3 < N; j += 4)
+            vst1q_f32(C + j, vfmaq_f32(vmulq_f32(bv, vld1q_f32(C + j)),
+                                         alv, vld1q_f32(temp + j)));
+    }
+    for (; j < N; ++j)
+        C[j] = (beta == 0.0f) ? alpha * temp[j]
+                               : alpha * temp[j] + beta * C[j];
+
+    if (N > kMaxStackN) delete[] temp;
+}
+
+/// K-major GEMV with OpenMP parallelization across N columns.
+static void gemm_gemv_kmajor_fp32(int N, int K,
+                                    const float* A,
+                                    const float* B, int ldb,
+                                    float alpha, float beta,
+                                    float* C) {
+#ifdef _OPENMP
+    int n_threads = 1;
+    if ((int64_t)N * K > 500000) {
+        #pragma omp parallel
+        {
+            #pragma omp single
+            n_threads = omp_get_num_threads();
+        }
+    }
+    if (n_threads > 1 && N >= 256 * n_threads) {
+        #pragma omp parallel
+        {
+            int tid = omp_get_thread_num();
+            int nth = omp_get_num_threads();
+            int j_start = tid * (N / nth);
+            int j_end = (tid == nth - 1) ? N : (tid + 1) * (N / nth);
+            int my_N = j_end - j_start;
+            if (my_N > 0)
+                gemm_gemv_kmajor_st(my_N, K, A, B, ldb, j_start,
+                                     alpha, beta, C + j_start);
+        }
+        return;
+    }
+#endif
+    // Single-threaded
+    gemm_gemv_kmajor_st(N, K, A, B, ldb, 0, alpha, beta, C);
+}
+
+// ============================================================
 // Small-M drivers
 // ============================================================
 
@@ -458,6 +584,12 @@ static void gemm_smallm1_fp32(int N, int K,
                                const float* B, int ldb,
                                float beta, float* C, int ldc) {
     (void)lda; (void)ldc;  // M=1, stride not needed
+
+    // NOTE: K-major sweep (K-outer/N-inner for sequential B reads) was evaluated
+    // but found not beneficial on Neoverse N2. The temp buffer read-modify-write
+    // per K iteration offsets the sequential B access benefit. The panel approach
+    // keeps accumulators in SIMD registers (zero temp traffic), which is more
+    // efficient despite the strided B access pattern.
 
     // Process N in panels of 48 columns using the optimized 1x48 kernel
     // (12 named accumulators, 4x K-unrolling, no register spills).
