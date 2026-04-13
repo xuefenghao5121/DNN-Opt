@@ -19,3 +19,10 @@ benchmarks/profiling/
 
 # Compile database
 compile_commands.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temp analysis binaries (development artifacts)
+analyze_*

@@ -1,61 +1,47 @@
 #!/bin/bash
 # build_onednn_with_dnnopt.sh
-# Build oneDNN with DNN-Opt as BLAS backend for ARM platforms.
+# Build oneDNN with dnnopt as ARM GEMM supplementary patch.
+#
+# dnnopt patches oneDNN's sgemm to accelerate small/irregular matrix shapes.
+# oneDNN handles large regular shapes natively — dnnopt only activates on weakness shapes.
 #
 # Prerequisites:
-#   - DNN-Opt built (cmake --build . in dnnopt/build)
-#   - oneDNN source cloned (git clone https://github.com/oneapi-src/oneDNN)
+#   - Clang-15 installed (/usr/bin/clang++-15)
+#   - oneDNN source (git clone https://github.com/oneapi-src/oneDNN)
 #
 # Usage:
 #   ./scripts/build_onednn_with_dnnopt.sh [ONEDNN_SRC_DIR]
-#
-# Environment:
-#   DNNOPT_ROOT  — path to dnnopt repo root (default: script's parent dir)
-#   ONEDNN_DIR   — path to oneDNN source (default: first arg or /tmp/onednn)
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DNNOPT_ROOT="${DNNOPT_ROOT:-$(dirname "$SCRIPT_DIR")}"
-ONEDNN_DIR="${1:-${ONEDNN_DIR:-/tmp/onednn}}"
+ONEDNN_DIR="${1:-${ONEDNN_DIR:-/root/onednn}}"
 
-echo "=== DNN-Opt oneDNN Integration Build ==="
+echo "=== dnnopt + oneDNN Integration Build ==="
 echo "  DNNOPT_ROOT: $DNNOPT_ROOT"
 echo "  ONEDNN_DIR:  $ONEDNN_DIR"
 echo ""
 
-# Step 1: Build dnnopt if not already built
+# Step 1: Build dnnopt
 if [ ! -f "$DNNOPT_ROOT/build/src/libdnnopt_blas.so" ]; then
-    echo "[1/3] Building dnnopt..."
+    echo "[1/3] Building dnnopt (Clang-15, Release)..."
     mkdir -p "$DNNOPT_ROOT/build"
     cd "$DNNOPT_ROOT/build"
-    cmake .. -DCMAKE_BUILD_TYPE=Release
+    cmake .. -DCMAKE_CXX_COMPILER=clang++-15 -DCMAKE_BUILD_TYPE=Release
     cmake --build . -j$(nproc)
 else
-    echo "[1/3] dnnopt already built: $DNNOPT_ROOT/build/src/libdnnopt_blas.so"
+    echo "[1/3] dnnopt already built"
 fi
 
-# Step 2: Apply dnnopt patches to oneDNN (if not already applied)
-if [ ! -f "$ONEDNN_DIR/cmake/FindDNNOPT.cmake" ]; then
-    echo "[2/3] Applying dnnopt patches to oneDNN..."
-    # Copy FindDNNOPT.cmake
-    if [ -f "$DNNOPT_ROOT/patches/FindDNNOPT.cmake" ]; then
-        cp "$DNNOPT_ROOT/patches/FindDNNOPT.cmake" "$ONEDNN_DIR/cmake/"
-    else
-        echo "  WARNING: patches not found, assuming oneDNN already patched"
-    fi
-else
-    echo "[2/3] oneDNN already patched"
-fi
-
-# Step 3: Build oneDNN with dnnopt
-echo "[3/3] Building oneDNN with DNNL_BLAS_VENDOR=DNNOPT..."
+# Step 2: Build oneDNN with dnnopt patch
+echo "[2/3] Building oneDNN with DNNL_AARCH64_USE_DNNOPT=ON..."
 mkdir -p "$ONEDNN_DIR/build"
 cd "$ONEDNN_DIR/build"
 cmake .. \
     -DCMAKE_BUILD_TYPE=Release \
-    -DDNNL_BLAS_VENDOR=DNNOPT \
-    -DDNNOPT_ROOT="$DNNOPT_ROOT" \
+    -DDNNL_AARCH64_USE_DNNOPT=ON \
+    -DCMAKE_PREFIX_PATH="$DNNOPT_ROOT/build" \
     -DDNNL_CPU_RUNTIME=OMP \
     -DDNNL_BUILD_EXAMPLES=OFF \
     -DDNNL_BUILD_TESTS=ON
@@ -63,9 +49,9 @@ cmake --build . -j$(nproc)
 
 echo ""
 echo "=== Build complete ==="
-echo "  oneDNN library: $ONEDNN_DIR/build/src/libdnnl.so"
+echo "  oneDNN+dnnopt: $ONEDNN_DIR/build/src/libdnnl.so"
 echo ""
-echo "To verify:"
-echo "  export LD_LIBRARY_PATH=$DNNOPT_ROOT/build/src:\$LD_LIBRARY_PATH"
-echo "  DNNL_VERBOSE=1 $ONEDNN_DIR/build/tests/benchdnn/benchdnn --matmul --dt=f32 2m3n4k"
-echo "  # Look for 'dnnopt' or 'blas' in verbose output"
+echo "To benchmark vs upstream oneDNN:"
+echo "  # Build upstream oneDNN separately (without dnnopt flags)"
+echo "  # Then compare with bench_onednn_sgemm test"
+echo "  LD_LIBRARY_PATH=$ONEDNN_DIR/build/src ./build/tests/bench_onednn_sgemm"
