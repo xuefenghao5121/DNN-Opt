@@ -15,6 +15,10 @@
 #include <algorithm>
 #include <cstring>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 #endif
@@ -621,9 +625,6 @@ void gemm_adaptive_tile_fp32(int M, int N, int K,
     if (!kernel_fn) kernel_fn = gemm_tile_kernel_full<8, 12>;
 
     // Phase 10: Kc blocking for large K.
-    // Target: A[Mr][Kc] + B[Kc][Nr] fit in L1D (64KB on N2).
-    // For 6x16: (6+16)*Kc*4 ≤ 64KB → Kc ≤ 744, round to 512.
-    // For small K (≤ Kc), this is a no-op (single iteration).
     uint32_t l1d = hw.l1d.size_bytes;
     if (l1d == 0) l1d = 64 * 1024;
     int Kc = (int)(l1d * 4 / 5) / ((Mr + Nr) * (int)sizeof(float));
@@ -632,29 +633,21 @@ void gemm_adaptive_tile_fp32(int M, int N, int K,
 
     // N outer loop: full Nr-wide panels
     int j_full = (N / Nr) * Nr;
-    for (int j0 = 0; j0 < j_full; j0 += Nr) {
+    int n_panels = j_full / Nr;
+
+    // Lambda: process one N-panel (full M rows + M-tail)
+    auto process_n_panel = [&](int j0) {
         int i = 0;
         for (; i + Mr - 1 < M; i += Mr) {
-            // Kc blocking: alpha for all blocks, beta for first, 1.0 for rest
             for (int pc = 0; pc < K; pc += Kc) {
                 int kc = std::min(Kc, K - pc);
                 float beta_k = (pc == 0) ? beta : 1.0f;
-
-                // Prefetch B for next Kc block into L2
-                if (pc + Kc < K) {
-                    const float* b_next = B + (pc + Kc) * ldb + j0;
-                    __asm__ volatile("prfm pldl2keep, [%0]" : : "r"(b_next) : "memory");
-                    __asm__ volatile("prfm pldl2keep, [%0]" : : "r"(b_next + 8) : "memory");
-                }
-
                 kernel_fn(kc, A + i * lda + pc, lda,
                           B + pc * ldb + j0, ldb,
                           C + i * ldc + j0, ldc,
                           alpha, beta_k);
             }
         }
-
-        // M tail with Kc blocking
         if (i < M) {
             int m_rem = M - i;
             const float* At = A + i * lda;
@@ -680,6 +673,25 @@ void gemm_adaptive_tile_fp32(int M, int N, int K,
                     gemm_tile_tail(m_rem, Nr, kc, alpha, At_k, lda, Bt_k, ldb, beta_k, Ct, ldc);
                 }
             }
+        }
+    };
+
+    // Phase 13H: parallelize across N panels for large shapes.
+    // Each panel writes different C columns — no write conflicts.
+#ifdef _OPENMP
+    int64_t total_flops = (int64_t)M * N * K * 2;
+    if (n_panels >= 2 && total_flops > 50 * 1024 * 1024) {
+        int nt = omp_get_max_threads();
+        if (nt > n_panels) nt = n_panels;
+        #pragma omp parallel for num_threads(nt) schedule(static)
+        for (int jp = 0; jp < n_panels; jp++) {
+            process_n_panel(jp * Nr);
+        }
+    } else
+#endif
+    {
+        for (int j0 = 0; j0 < j_full; j0 += Nr) {
+            process_n_panel(j0);
         }
     }
 

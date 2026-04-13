@@ -151,21 +151,23 @@ void gemm_fp32(int M, int N, int K,
                 gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
                 return;
             }
-            // Phase 13: For M=4-7 with very large N*K, use packed registry path.
+            // Phase 13: For M=4 with very large N*K, use packed registry path.
             // This enables 2D threading + huge pages, which outperforms small-M
             // wide driver for shapes like batch4-LLM (4×4096×4096).
-            // Threshold: N*K > 4M (e.g., N=4096, K>=1024 or N>=1024, K=4096)
-            // Only when M matches a registry kernel Mr (4 or 8) to avoid tail waste.
-            // M=5,6,7 use adaptive tile kernels (5x16, 6x16, 7x16) instead.
+            // M=5,6,7: fall through to adaptive tile (threaded) instead.
             constexpr int64_t kLargeNKThreshold = 4 * 1024 * 1024;
             if (M == 4 && (int64_t)N * K > kLargeNKThreshold) {
                 // Fall through to registry dispatch (packed + threaded)
                 goto registry_dispatch;
             }
+            // M=5-7 with large N*K: use adaptive tile (now OpenMP-threaded)
+            // rather than wide driver (single-threaded).
+            if (M >= 5 && (int64_t)N * K > kLargeNKThreshold) {
+                // Fall through to adaptive tile path below
+            } else
             // M=2-7: use wide driver for N >= 48 (macro-tiling benefit).
             // M=2-3: always use wide driver (was original routing).
             // M=4-7: only for N >= 48 where 48-col panels amortize B loads.
-            // For tiny N, fall through to adaptive tile (asm kernels better).
             if (M >= 2 && (M < 4 || N >= 48)) {
                 gemm_smallm_wide_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
                 return;
