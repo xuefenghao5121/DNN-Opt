@@ -12,6 +12,10 @@
 #include <algorithm>
 #include <cstring>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 #endif
@@ -609,13 +613,15 @@ static void gemm_smallm1_fp32(int N, int K,
     }
     if (n_threads > 1 && N >= kSmallMNr * n_threads) {
         // Parallel path: each thread gets a range of N-panels
+        // Only process full panels (N - kSmallMNr + 1 iterations max)
+        int n_full_panels = (N >= kSmallMNr) ? (N - kSmallMNr + 1) : 0;
         #pragma omp parallel for schedule(static)
-        for (int j0 = 0; j0 + kSmallMNr <= N; j0 += kSmallMNr) {
-            gemm_ukernel_fp32_1x48(K, A, B + j0, ldb, C + j0,
+        for (int j0 = 0; j0 < n_full_panels; j0 += 1) {
+            gemm_ukernel_fp32_1x48(K, A, B + j0 * kSmallMNr, ldb, C + j0 * kSmallMNr,
                                     alpha, beta, /*packed=*/false);
         }
         // Handle remaining columns in single thread
-        int j0 = (N / kSmallMNr) * kSmallMNr;
+        int j0 = n_full_panels * kSmallMNr;
         if (j0 < N) {
             gemm_neon_1xn(K, N - j0, A, B + j0, ldb, C + j0, alpha, beta);
         }

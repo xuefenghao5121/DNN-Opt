@@ -1,0 +1,66 @@
+"""Bazel BUILD for DNN-Opt GEMM library (oneDNN integration)."""
+
+load("@org_tensorflow//third_party:mkl_dnn_build.bzl", "if_mkl_aarch64_openmp")
+
+_DNNOPT_COPTS = [
+    "-O3",
+    "-fexceptions",
+    "-fopenmp",
+    "-DNDEBUG",
+    "-march=armv8.2-a+bf16+dotprod+fp16+i8mm",
+    "-Wno-ignored-attributes",
+    "-Wno-deprecated-copy",
+    "-Wno-unused-function",
+    "-Wno-sign-compare",
+]
+
+cc_library(
+    name = "dnnopt",
+    srcs = [
+        # Core GEMM driver
+        "src/gemm/gemm.cpp",
+        "src/gemm/gemm_driver_fp32.cpp",
+        "src/gemm/gemm_driver_generic.cpp",
+        "src/gemm/gemm_driver_unpacked_fp32.cpp",
+        "src/gemm/gemm_driver_bf16.cpp",
+        # Small-M specialized kernels
+        "src/gemm/gemm_smallm_fp32.cpp",
+        "src/gemm/gemm_smallm_fp32_v2.cpp",
+        "src/gemm/gemm_smallm_wide_fp32.cpp",
+        "src/gemm/gemm_tiny_fp32.cpp",
+        "src/gemm/gemm_adaptive_tile_fp32.cpp",
+        # NEON microkernels
+        "src/gemm/gemm_ukernel_fp32_neon.cpp",
+        "src/gemm/gemm_ukernel_fp32_asm.cpp",
+        "src/gemm/gemm_ukernel_fp32_6x16.cpp",
+        "src/gemm/gemm_ukernel_fp32_8x16.cpp",
+        "src/gemm/gemm_ukernel_fp32_npo2.cpp",
+        "src/gemm/gemm_ukernel_bf16_neon.cpp",
+        "src/gemm/gemm_kernel_asm_fp32.cpp",
+        # Generated packed kernels
+        "src/gemm/generated/neon_fp32_2x16.cpp",
+        "src/gemm/generated/neon_fp32_4x8.cpp",
+        "src/gemm/generated/neon_fp32_4x12.cpp",
+        "src/gemm/generated/neon_fp32_4x16.cpp",
+        "src/gemm/generated/neon_fp32_8x12.cpp",
+        # Support
+        "src/gemm/gemm_autotune.cpp",
+        "src/gemm/gemm_threading.cpp",
+        "src/gemm/gemm_pack_fp32.cpp",
+        "src/gemm/gemm_pack_bf16.cpp",
+        "src/gemm/gemm_ukernel_registry.cpp",
+        # Utilities
+        "src/utils/aligned_alloc.cpp",
+        "src/hwcaps/arm_hwcaps.cpp",
+        "src/cpu_tuning_profiles.cpp",
+    ],
+    hdrs = glob([
+        "include/dnnopt/**/*.h",
+    ]),
+    includes = [
+        "include",
+    ],
+    copts = _DNNOPT_COPTS,
+    linkstatic = True,
+    visibility = ["//visibility:public"],
+)
