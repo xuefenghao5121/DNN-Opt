@@ -1,0 +1,31 @@
+TensorFlow End-to-End MatMul Benchmark
+==================================================
+TensorFlow Version: 2.16.1
+Built with CUDA: False
+oneDNN: Not available
+JIT enabled: True (default in TF 2.x)
+
+Test Case                      M      N      K       GFLOPS     Time(us)
+--------------------------------------------------------------------------------
+CVR embedding                  1    256   1024        3.909        134.1
+CVR fc1                        1    128    256        0.533        123.0
+CVR fc2                        1     64    128        0.306         53.5
+CVR classifier                 1     10     64        0.025         51.7
+CVR embedding (b=4)            4    256   1024       10.013        209.4
+CVR fc1 (b=4)                  4    128    256        3.073         85.3
+CVR fc2 (b=4)                  4     64    128        1.009         65.0
+CVR classifier (b=4)           4     10     64        0.093         55.2
+BERT QKV                      32    256    256       17.896        234.4
+BERT Out                      32    256    256       19.913        210.6
+BERT FFN1                     32    256    512       24.507        342.3
+BERT FFN2                     32    512    256       28.485        294.5
+LLM QKV                        8    512    512       19.468        215.4
+LLM Out                        8    512    512       19.680        213.1
+LLM FFN1                       8    512   1376       28.945        389.4
+LLM FFN2                       8   1376    512       31.688        355.7
+Large 2048x2048             2048   2048   2048       85.716     200426.6
+--------------------------------------------------------------------------------
+Average GFLOPS: 17.368
+
+Note: This uses TensorFlow's default backend (Eigen/XNNPACK).
+For oneDNN+dnnopt results, use the C++ benchmark (benchmark_acl).

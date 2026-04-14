@@ -1,0 +1,45 @@
+=== Building DNN-Opt CBLAS Test ===
+Compiling test_dnnopt_cblas...
+✓ Compilation successful
+
+=== Running DNN-Opt CBLAS Test ===
+
+========================================
+DNN-Opt CBLAS SGEMM Benchmark
+========================================
+Library: dnnopt (via cblas)
+Compiler: Clang 15.0.7
+Threads: 2 (OpenMP)
+
+Shape                         M     N     K      GFLOPS    Time(us)
+-------------------------------------------------------------------
+CVR embedding                 1   256  1024       10.81  48513880.0
+CVR fc1                       1   128   256       10.64   6160880.0
+CVR fc2                       1    64   128       13.86   1181820.0
+CVR classifier                1    10    64        4.61    277610.0
+CVR embedding (b=4)           4   256  1024       25.26  83032770.0
+CVR fc1 (b=4)                 4   128   256       28.40   9229330.0
+CVR fc2 (b=4)                 4    64   128       29.08   2253830.0
+CVR classifier (b=4)          4    10    64        7.06    724810.0
+BERT QKV                     32   256   256       31.94 131338050.0
+BERT FFN1                    32   256   512       31.48 266465160.0
+BERT FFN2                    32   512   256       30.53 274755280.0
+LLM QKV                       8   512   512       18.37 228382220.0
+LLM FFN1                      8   512  1376       21.76 518016100.0
+LLM FFN2                      8  1376   512       23.05 488966500.0
+Medium square               256   256   256       34.33 977292980.0
+-------------------------------------------------------------------
+Average GFLOPS: 21.41
+
+========================================
+Backend Comparison (GFLOPS)
+========================================
+Backend               Avg GFLOPS vs dnnopt
+------------------------------------------
+DNN-Opt (cblas)            21.41     1.00x
+NumPy/OpenBLAS             33.21      1.55x
+TF/Eigen                   17.37      0.81x
+
+Note: This uses dnnopt's cblas_sgemm implementation.
+
+Test complete!
