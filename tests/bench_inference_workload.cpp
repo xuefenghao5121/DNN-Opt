@@ -17,7 +17,7 @@
 #include <string>
 #include <algorithm>
 
-#include <dnnl.h>
+#include <oneapi/dnnl/dnnl.h>
 
 namespace {
 
