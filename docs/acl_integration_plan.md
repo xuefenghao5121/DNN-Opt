@@ -4,6 +4,17 @@
 
 oneDNN aarch64 没有 `gemm_driver`（只有 x64/ppc64 有），导致大矩阵 fallback 到 `ref_gemm` 性能很差。需要集成 ACL (Arm Compute Library) 的大矩阵 GEMM 作为 fallback。
 
+## 重要发现 (2026-04-18)
+
+**ACL 版本不兼容问题**：
+- TensorFlow bazel 缓存的 ACL: **v31.0.1**
+- oneDNN 要求 ACL: **v52.4+** (需要 `CpuActivation.h` 等新 API)
+- oneDNN 的 `acl_eltwise.hpp` 等文件依赖 ACL 52.x 的新 experimental operators API
+
+**解决方案选择**：
+- 方案 A（完整 ACL）需要升级 ACL 到 52.x+，可能影响 TensorFlow 构建
+- 方案 D（优化 dnnopt）是最可行的路径，无外部依赖
+
 ## 现状分析
 
 ### oneDNN 已有 ACL 集成
