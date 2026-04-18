@@ -1,6 +1,6 @@
 # DNN-Opt: oneDNN Supplementary Patch for ARM Inference
 
-**Version 0.9.15-dev** | ARM GEMM optimization library, designed as a supplementary patch for oneDNN.
+**Version 0.9.16-dev** | ARM GEMM optimization library, designed as a supplementary patch for oneDNN.
 
 Dnnopt accelerates the matrix shapes where oneDNN underperforms -- small M, irregular N, tall-skinny dimensions -- while falling back to oneDNN for shapes where oneDNN is already near-peak. No code changes required in your inference framework.
 
@@ -60,7 +60,7 @@ Peak GFLOPS = 48.0 (2 cores x 3 GHz x 8 FLOPS/cycle for FMLA).
 
 ```bash
 # 1. Build dnnopt (requires Clang-15 on AArch64)
-cd onednn-arm-opt
+cd DNN-Opt
 mkdir build && cd build
 cmake .. -DCMAKE_CXX_COMPILER=clang++-15 -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
@@ -68,30 +68,40 @@ cmake --build . -j$(nproc)
 # 2. Run correctness tests (74 cases)
 ctest --output-on-failure
 
-# 3. Option A: Use as oneDNN patch (recommended)
-#    See integration/onednn/README.md for full instructions
-cd /path/to/onednn && mkdir build && cd build
+# 3. Use as oneDNN patch (recommended)
+#    Apply patch to oneDNN source
+git clone https://github.com/oneapi-src/oneDNN onednn-dnnopt
+cd onednn-dnnopt
+git apply /path/to/DNN-Opt/integration/onednn/0001-dnnopt-integration.patch
+
+#    Build oneDNN with dnnopt + OpenBLAS (required for large-M fallback)
+mkdir build && cd build
 cmake .. -DDNNL_AARCH64_USE_DNNOPT=ON \
-         -DCMAKE_PREFIX_PATH=/path/to/dnnopt/build
+         -DDNNOPT_ROOT=/path/to/DNN-Opt \
+         -DDNNL_BLAS_VENDOR=OPENBLAS \
+         -DBLAS_INCLUDE_DIR=/usr/include/openblas \
+         -DCMAKE_BUILD_TYPE=Release
 cmake --build . -j$(nproc)
 
-# 4. Option B: Use as BLAS drop-in
-LD_PRELOAD=/path/to/libdnnopt_blas.so python your_model.py
+# 4. Or use as BLAS drop-in
+LD_PRELOAD=/path/to/DNN-Opt/build/src/libdnnopt_blas.so python your_model.py
 ```
 
 ## Integration
 
 ### As oneDNN Patch (Recommended)
 
-Dnnopt patches oneDNN's `dnnl_sgemm` dispatch path. When oneDNN calls SGEMM, dnnopt intercepts the call and decides:
+Dnnopt patches oneDNN's `dnnl_sgemm` dispatch path. When oneDNN calls SGEMM, the patched dispatch logic decides:
 
-- **Weakness shapes** (M < 16, irregular N, tall-skinny): use dnnopt optimized kernels
-- **Strong shapes** (large regular matrices): fall back to oneDNN native implementation
+- **Weakness shapes** (M < 32, irregular N/K, transposed): use dnnopt optimized kernels
+- **Strong shapes** (M ≥ 32, regular matrices): fall back to OpenBLAS `cblas_sgemm`
+- **Final fallback**: slow `ref_gemm`
 
-This means zero code changes in your inference framework. Just rebuild oneDNN with dnnopt and you get automatic acceleration.
+This means zero code changes in your inference framework. Just apply the patch and rebuild oneDNN to get automatic acceleration for small/irregular shapes.
 
 **Prerequisites:**
 - Clang-15 installed (`/usr/bin/clang++-15`)
+- OpenBLAS installed (`yum install openblas-devel`)
 - oneDNN source: `git clone https://github.com/oneapi-src/oneDNN`
 
 **Build script:**
@@ -363,12 +373,17 @@ cmake .. -DCMAKE_CXX_COMPILER=clang++-15 \
 ## Project Structure
 
 ```
-onednn-arm-opt/
+DNN-Opt/
 ├── CMakeLists.txt
 ├── README.md
+├── docs/
+│   └── acl_integration_plan.md      # ACL analysis (not used)
 ├── integration/
-│   └── onednn/
-│       └── README.md              # oneDNN integration guide
+│   ├── onednn/
+│   │   ├── 0001-dnnopt-integration.patch  # oneDNN patch (1056 lines)
+│   │   └── README.md               # oneDNN integration guide
+│   └── tensorflow/
+│       └── README.md               # TensorFlow integration guide
 ├── scripts/
 │   ├── build_onednn_with_dnnopt.sh  # Build oneDNN with dnnopt
 │   ├── profile.sh                    # Perf profiling script

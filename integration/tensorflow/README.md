@@ -1,75 +1,134 @@
 # TensorFlow + oneDNN + DNN-Opt Integration
 
-This directory contains files for integrating DNN-Opt into TensorFlow's oneDNN backend.
+This directory contains guidance for integrating DNN-Opt into TensorFlow via oneDNN backend.
 
-## Files
+## Status
 
-- `acl_sve_fix.patch` - Fix for ACL (Compute Library) SVE compilation issue
-- `onednn_dnnopt.patch` - oneDNN patch to add DNN-Opt dispatch
-- `apply_dnnopt.sh` - Automation script to apply patches
-- `dnnopt.BUILD` - Bazel BUILD file for dnnopt library
+**Tested**: TensorFlow 2.16.1, Neoverse N2 (2 cores @ 3GHz), Ubuntu 22.04
+
+## Integration Approach
+
+DNN-Opt integrates into TensorFlow through oneDNN:
+
+```
+TensorFlow XLA → oneDNN (dnnl_sgemm) → DNN-Opt dispatch
+```
+
+1. Build TensorFlow with oneDNN backend (`--config=mkl_aarch64_threadpool`)
+2. Apply oneDNN patch from `../onednn/0001-dnnopt-integration.patch`
+3. DNN-Opt handles small-M GEMM, OpenBLAS handles large-M
 
 ## Prerequisites
 
 - TensorFlow 2.16+ source tree
 - Bazel 6.5.0+
 - Clang 15.0.7+
+- **LLD linker** (`yum install lld`) - required for ARM64 TLSLE
+- OpenBLAS (`yum install openblas-devel`)
 - Neoverse N2 or similar ARMv8.5-a platform
 
-## Integration Steps
+## Build Steps
 
-1. Copy integration files to TensorFlow source tree:
-   ```bash
-   cp acl_sve_fix.patch <tf-source>/third_party/compute_library/
-   cp onednn_dnnopt.patch <tf-source>/third_party/mkl_dnn/
-   cp apply_dnnopt.sh <tf-source>/
-   cp dnnopt.BUILD <tf-source>/
-   ```
+### 1. Clone and Configure TensorFlow
 
-2. Run integration script:
-   ```bash
-   cd <tf-source>
-   ./apply_dnnopt.sh
-   ```
+```bash
+git clone https://github.com/tensorflow/tensorflow.git tf-build
+cd tf-build
+./configure  # Accept defaults, no GPU/cloud services
+```
 
-3. Build TensorFlow with oneDNN+dnnopt:
-   ```bash
-   bazel build --config=mkl_aarch64 --jobs=2 \
-       //tensorflow/tools/pip_package:build_pip_package
-   ```
+### 2. Build with oneDNN Threadpool (CRITICAL)
 
-## ACL SVE Fix Details
+**IMPORTANT**: Use `mkl_aarch64_threadpool`, NOT `mkl_aarch64`.
 
-### Problem
-ACL's `arm_compute` core library defines `ARM_COMPUTE_ENABLE_SVE` in `local_defines`
-but compiles with `-march=armv8.2-a+fp16` (without SVE), causing compilation errors.
+| Config | `OneDnnThreadPool` inheritance | Result |
+|--------|-------------------------------|--------|
+| `mkl_aarch64` | NO (stub only) | ❌ XLA compile fails |
+| `mkl_aarch64_threadpool` | YES (proper) | ✅ Works |
 
-### Solution
-The patch removes:
-1. `ARM_COMPUTE_ENABLE_SVEF32MM` from `common_defines`
-2. `ARM_COMPUTE_ENABLE_SVE` from `arm_compute` core library's `local_defines`
+```bash
+bazel build --config=mkl_aarch64_threadpool \
+  --config=noaws --config=nogcp --config=nohdfs --config=nonccl \
+  --jobs=2 --distinct_host_configuration=false \
+  --linkopt=-fuse-ld=lld \
+  //tensorflow:libtensorflow.so //tensorflow:libtensorflow_framework.so
+```
 
-### Verified Results
-- ACL compilation: 1268 processes, 596s ✓
-- oneDNN + ACL + dnnopt: 428 processes, 664s ✓
-- Generated library: `libmkl_dnn_acl.so` (31MB)
+### 3. Apply DNN-Opt Patch (Optional)
 
-## Build Configuration
+For additional small-M acceleration:
 
-- Compiler: Clang 15.0.7
-- Architecture: ARMv8.2-a+fp16 (ACL), ARMv8.5-a+bf16+dotprod+fp16+i8mm (dnnopt)
-- Threading: OpenMP (libgomp)
-- Bazel jobs: 2 (Neoverse N2 dual-core)
+```bash
+# After baseline oneDNN build succeeds, patch TF's internal oneDNN
+cd third_party/mkl_dnn
+git apply /path/to/DNN-Opt/integration/onednn/0001-dnnopt-integration.patch
 
-## Performance Notes
+# Add dnnopt.BUILD for bazel
+cp /path/to/DNN-Opt/integration/tensorflow/dnnopt.BUILD .
 
-DNN-Opt shows 54 wins / 1 loss vs oneDNN standalone on inference workloads:
-- CVR: 13.3x (batch=1), 21.9x (batch=4)
-- BERT-small: 6.7x (batch=1), 11.5x (batch=4)
-- LLM: 5.9x (batch=1), 3.6x (batch=4)
+# Rebuild (uses bazel cache)
+bazel build --config=mkl_aarch64_threadpool --linkopt=-fuse-ld=lld \
+  //tensorflow:libtensorflow.so
+```
 
-## Next Steps
+## Known Issues & Solutions
 
-- Run end-to-end TensorFlow benchmarks with oneDNN+dnnopt
-- Compare against baseline TensorFlow (Eigen/XNNPACK)
-- Validate GEMM dispatch correctness
+### 1. XLA MatMul vs Threadpool Interface Mismatch
+
+When using OpenMP config (`--config=mkl_aarch64`), XLA fails:
+
+```
+error: no matching function for call to 'MakeOneDnnStream'
+```
+
+**Solution**: Use `--config=mkl_aarch64_threadpool` instead.
+
+### 2. ARM64 TLSLE Linker Error
+
+Gold linker fails on large binaries:
+
+```
+ld.gold: error: unsupported reloc 549/551 in non-static TLSLE mode
+```
+
+**Solution**: Install LLD and use `--linkopt=-fuse-ld=lld`.
+
+### 3. tfcompile Binary Fails
+
+`tfcompile` requires PIC which LLD doesn't support for this case. Use shared library targets instead.
+
+## Performance Results
+
+### TensorFlow + oneDNN (Baseline)
+
+| Configuration | GFLOPS | Notes |
+|---------------|--------|-------|
+| Pre-built tensorflow-aarch64 | 13.24 | Eigen backend |
+| Compiled TF + oneDNN | 20.29 | 1.53x faster |
+
+### TensorFlow + oneDNN + DNN-Opt
+
+| Shape | dnnopt+OpenBLAS | upstream | Speedup |
+|-------|-----------------|----------|---------|
+| CVR b1 | 11.91 | 4.36 | **2.7x** |
+| CVR b4 | 28.63 | 4.69 | **6.1x** |
+| LLM b1 | 19.71 | 10.54 | **1.87x** |
+
+## Verification
+
+```bash
+export LD_LIBRARY_PATH=$PWD/bazel-out/aarch64-opt/bin/tensorflow:$LD_LIBRARY_PATH
+python3 -c "import tensorflow as tf; print('TF:', tf.__version__)"
+```
+
+## Files
+
+- `dnnopt.BUILD` - Bazel BUILD for dnnopt library (if needed)
+- `acl_sve_fix.patch` - ACL SVE compilation fix (legacy)
+
+## References
+
+- [TensorFlow Configure](https://www.tensorflow.org/install/source)
+- oneDNN in TF: `third_party/mkl_dnn/`
+- XLA oneDNN matmul: `third_party/xla/xla/service/cpu/onednn_matmul.cc`
+- Threadpool interface: `third_party/tsl/tsl/util/onednn_threadpool.h`

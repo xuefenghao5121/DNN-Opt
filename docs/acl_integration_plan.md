@@ -1,5 +1,9 @@
 # ACL GEMM 集成方案分析
 
+> **结论**: ACL 集成不可行。版本不兼容 (TF ACL v31 vs oneDNN v52)。已改用 OpenBLAS 作为大矩阵 fallback。
+>
+> **当前方案**: dnnopt (M<32) + OpenBLAS (M>=32) + ref_gemm (fallback)
+
 ## 背景
 
 oneDNN aarch64 没有 `gemm_driver`（只有 x64/ppc64 有），导致大矩阵 fallback 到 `ref_gemm` 性能很差。需要集成 ACL (Arm Compute Library) 的大矩阵 GEMM 作为 fallback。
