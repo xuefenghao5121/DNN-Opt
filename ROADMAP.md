@@ -1,8 +1,24 @@
 # DNN-Opt Roadmap
 
-## Current Version: v0.9.19-dev
+## Current Version: v0.9.20-dev
 
-**Status**: Depthwise + Winograd F(4x4) implemented, Conv benchmark expanded
+**Status**: Complete Conv2D dispatch + BF16/INT8 Conv + Conv3D
+
+## Completed: v0.9.20 Tasks
+
+### ✅ Grouped Convolution
+- ResNeXt/ShuffleNet support (groups > 1)
+- Per-group Winograd optimization
+- 1x1 grouped GEMM path
+
+### ✅ BF16/INT8 Conv2D
+- BFMMLA convolution (2x compute density)
+- SMMLA convolution (4x compute density)
+- Dynamic quantization support
+
+### ✅ Conv3D (Video)
+- im2col3d + GEMM implementation
+- NDHWC layout for video models
 
 ## Completed: v0.9.19 Tasks
 
@@ -188,10 +204,10 @@
 
 ## Version Milestones
 
-### v0.9.20 (Next)
-- Grouped convolution (ResNeXt, ShuffleNet)
-- Convolution BF16/INT8 kernels
-- 3D convolution (video processing)
+### v0.9.21 (Next)
+- Conv3D BF16/INT8 kernels
+- Depthwise BF16/INT8 kernels
+- Conv benchmark with BF16/INT8 shapes
 
 ### v0.10.0 (Major)
 - FP8 kernels when ARMv9-A hardware available

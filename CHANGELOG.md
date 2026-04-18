@@ -4,6 +4,43 @@ All notable changes to DNN-Opt will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.20-dev] - 2026-04-19
+
+### Added
+- **Grouped Convolution** (`conv_grouped.cpp`)
+  - Per-group dispatch for ResNeXt/ShuffleNet (groups > 1, groups < IC)
+  - Winograd F(2x2)/F(4x4) per-group optimization
+  - 1x1 grouped direct GEMM path
+  - API: `conv2d_grouped_fp32()`
+
+- **BF16 Conv2D** (`conv_bf16.cpp`)
+  - FP32 → BF16 conversion for input/filter
+  - BFMMLA-based convolution for 2x compute density
+  - Dynamic filter quantization (one-time)
+  - API: `conv2d_bf16()`
+
+- **INT8 Conv2D** (`conv_int8.cpp`)
+  - Per-tensor dynamic quantization
+  - SMMLA-based convolution (4x compute density vs FP32)
+  - INT32 accumulation → FP32 dequantization
+  - API: `conv2d_int8()`
+
+- **Conv3D** (`conv3d.cpp`, `conv3d.h`)
+  - 3D temporal+spatial convolution for video processing
+  - im2col3d + GEMM implementation
+  - NDHWC layout support
+  - C3D/I3D video model support
+  - API: `conv3d_fp32()`
+
+### Changed
+- **Conv2D Dispatch Complete**
+  - Full dispatch chain: Depthwise → Grouped → 1x1 → Winograd → im2col
+  - Automatic precision selection based on hardware capabilities
+
+### Tests
+- test_conv_correctness: Passed
+- test_gemm_correctness: Passed
+
 ## [0.9.19-dev] - 2026-04-18
 
 ### Added
