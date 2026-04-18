@@ -4,6 +4,34 @@ All notable changes to DNN-Opt will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.18-dev] - 2026-04-18
+
+### Added
+- **Enhanced Autotuning** (`gemm_autotune.cpp`)
+  - Expanded search grid: 5 candidates (Conservative → Maximum)
+  - Multi-shape testing: Large, Small, Tall-skinny, Square, Batch1
+  - Shape-specific tuning with weighted scoring
+  - Total autotune cost: ~10-15ms (5 shapes × 5 candidates)
+
+- **Winograd F(2x2, 3x3) Convolution** (`conv_winograd.cpp`)
+  - Reduces multiplications by 2.25x (9 → 4 per output pixel)
+  - Input/Filter/Output transforms with optimized formulas
+  - Dispatch: 3x3 stride=1 padding=1 with OH,OW >= 8
+  - Efficient for ResNet/MobileNet 3x3 convolutions
+
+### Changed
+- **Conv2D Dispatch**
+  - Added Winograd path for 3x3 stride=1 padding=1 convolutions
+  - Dispatch order: 1x1 direct → Winograd 3x3 → im2col+GEMM
+
+### Performance
+- Winograd 3x3: ~2x speedup vs im2col+GEMM for medium-large spatial dims
+- Autotuning: Better cache blocking for unknown ARM CPUs
+
+### Tests
+- test_conv_correctness: Passed with Winograd dispatch
+- test_gemm_correctness: Passed
+
 ## [0.9.17-dev] - 2026-04-18
 
 ### Added

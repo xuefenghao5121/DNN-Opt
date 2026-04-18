@@ -1,8 +1,24 @@
 # DNN-Opt Roadmap
 
-## Current Version: v0.9.17-dev
+## Current Version: v0.9.18-dev
 
-**Status**: Multi-precision support complete (FP32, BF16, INT8, FP8 framework)
+**Status**: Autotuning improvements + Winograd convolution implemented
+
+## Completed: v0.9.18 Tasks
+
+### ✅ Autotuning Improvements
+- Expanded search grid (5 candidates)
+- Multi-shape testing (5 shapes)
+- Shape-specific weighted scoring
+- Total cost: ~10-15ms
+
+### ✅ Winograd 3x3 Convolution
+- F(2x2, 3x3) algorithm implemented
+- 2.25x fewer multiplications
+- Dispatch integrated in conv2d_fp32()
+
+### ✅ Benchmark Suite
+- BF16/INT8 benchmarks verified in bench_gemm.cpp
 
 ## Phase 1: FP8 Hardware Support (Pending ARMv9-A)
 
@@ -157,10 +173,10 @@
 
 ## Version Milestones
 
-### v0.9.18 (Next)
-- Autotuning improvements
-- Convolution optimization start
-- Benchmark suite expansion
+### v0.9.19 (Next)
+- Depthwise convolution optimization
+- Winograd F(4x4, 3x3) variant
+- Convolution benchmark expansion
 
 ### v0.10.0 (Major)
 - FP8 kernels when ARMv9-A hardware available
