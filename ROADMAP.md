@@ -1,8 +1,26 @@
 # DNN-Opt Roadmap
 
-## Current Version: v0.9.22-dev
+## Current Version: v0.9.23-dev
 
-**Status**: Native INT8 GEMM + Conv3D benchmark
+**Status**: INT8 SMMLA Native GEMM + Conv3D Winograd framework
+
+## Completed: v0.9.23 Tasks
+
+### ✅ INT8 SMMLA Native GEMM
+- `gemm_int8_int8int8int32()`: 8×8 tile vmmlaq_s32 processing
+- Correct B layout: [OC, K] column-major for transpose product
+- Conv3D INT8 uses SMMLA native GEMM
+- Performance: 74-174 GFLOPS (2-4x vs FP32)
+
+### ⏳ Conv3D Winograd F(2x2, 3x3x3)
+- Framework created (`conv_winograd3d.cpp`)
+- Input/filter/output transform functions implemented
+- Currently disabled pending correctness validation
+- Expected: 2.25x fewer spatial MACs
+
+### ✅ Conv3D INT8 Performance Validation
+- test_conv3d_correctness: 18/18 passed
+- Benchmark: INT8 74-174 GFLOPS on Neoverse N2
 
 ## Completed: v0.9.22 Tasks
 

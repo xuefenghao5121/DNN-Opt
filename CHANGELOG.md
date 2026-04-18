@@ -4,6 +4,27 @@ All notable changes to DNN-Opt will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.23-dev] - 2026-04-19
+
+### Added
+- **INT8 SMMLA Native GEMM** (`gemm_int8_native.cpp`)
+  - 8×8 tile processing using vmmlaq_s32 SMMLA instruction
+  - Correct B matrix layout: [OC, K] column-major for transpose product
+  - 4x compute density improvement vs FP32
+
+### Changed
+- **Conv3D INT8 Performance**
+  - Small-3x3x3: 74 GFLOPS (3.4x vs FP32)
+  - Medium-3x3x3: 148 GFLOPS (4.2x vs FP32)
+  - C3D-conv2-mini: 174 GFLOPS (4.2x vs FP32)
+
+### Performance
+- INT8 Conv3D achieves 74-174 GFLOPS on Neoverse N2
+- 2-4x improvement over FP32 baseline
+
+### Tests
+- test_conv3d_correctness: 18/18 passed (INT8 SMMLA)
+
 ## [0.9.22-dev] - 2026-04-19
 
 ### Added

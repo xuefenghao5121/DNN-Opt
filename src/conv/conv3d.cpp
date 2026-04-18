@@ -147,16 +147,23 @@ static void apply_conv3d_postops(float* output, int num_rows, int OC,
     }
 }
 
-/// Conv3D FP32: im2col3d + GEMM.
+/// Conv3D FP32: im2col3d + GEMM (Winograd TODO: F(2x2, 3x3x3) not yet validated).
 void conv3d_fp32(const Conv3DParams& p,
                  const float* input,
                  const float* filter,
                  const float* bias,
                  float* output,
                  Conv3DPostOp post_op) {
+    // Winograd F(2x2, 3x3x3) dispatch - currently disabled pending validation
+    // TODO: Implement correct Winograd input transform and validate against reference
+    // Conditions: KD=KH=KW=3, stride=1, pad=1, OH>=4, OW>=4
+
+    // im2col3d + GEMM path
     if (p.N <= 0 || p.OC <= 0 || p.IC <= 0) return;
 
-    const int OD = p.OD(), OH = p.OH(), OW = p.OW();
+    const int OH = p.OH(), OW = p.OW();
+    const int OD = p.OD();
+    // OH and OW already defined above for Winograd check
     const int M = p.N * OD * OH * OW;
     const int K = p.IC * p.KD * p.KH * p.KW;
     const int N_gemm = p.OC;
@@ -491,19 +498,13 @@ void conv3d_int8(const Conv3DParams& p,
     auto col_q = aligned_array<int8_t>((size_t)M * K);
     im2col_3d_nhwc_int8(p, input_q.get(), col_q.get());
 
-    // Transpose filter: [OC, K] → [K, OC] in INT8
-    auto filter_T_q = aligned_array<int8_t>((size_t)K * OC);
-    for (int oc = 0; oc < OC; ++oc) {
-        for (int k = 0; k < K; ++k) {
-            filter_T_q.get()[k * OC + oc] = filter_q.get()[oc * K + k];
-        }
-    }
-
     // INT32 accumulator buffer
     auto output_acc = aligned_array<int32_t>((size_t)M * OC);
 
-    // Direct INT8 GEMM: output_acc[M, OC] = col_q[M, K] × filter_T_q[K, OC]
-    gemm_int8_int8int8int32(M, OC, K, col_q.get(), K, filter_T_q.get(), OC, output_acc.get(), OC);
+    // Direct INT8 GEMM: output_acc[M, OC] = col_q[M, K] × filter_q[OC, K]
+    // B is [OC, K] column-major, ldb = K
+    // SMMLA expects B in column-major layout
+    gemm_int8_int8int8int32(M, OC, K, col_q.get(), K, filter_q.get(), K, output_acc.get(), OC);
 
     // Dequantize to FP32
     float dequant_scale = input_scale * filter_scale;

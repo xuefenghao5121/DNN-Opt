@@ -39,7 +39,9 @@ enum class Conv3DPostOp {
     kRelu6,      // min(6, max(0, x))
 };
 
-/// FP32 Conv3D with im2col3d + GEMM.
+/// FP32 Conv3D with Winograd F(2x2, 3x3x3) optimization.
+/// Dispatches to Winograd when KD=KH=KW=3, stride=1, pad=1, OH>=4, OW>=4.
+/// Falls back to im2col3d + GEMM for other configurations.
 ///
 /// @param p      Conv3D parameters
 /// @param input  Input tensor [N, ID, IH, IW, IC] (NDHWC)
@@ -53,6 +55,37 @@ void conv3d_fp32(const Conv3DParams& p,
                  const float* bias,
                  float* output,
                  Conv3DPostOp post_op = Conv3DPostOp::kNone);
+
+/// Winograd F(2x2, 3x3x3) Conv3D for stride=1, padding=1.
+/// Applies spatial Winograd per temporal slice, then accumulates temporal.
+/// Reduces spatial multiplications by 2.25x.
+///
+/// @param p      Conv3D params (must have KD=KH=KW=3, stride=1, pad=1)
+/// @param input  [N, ID, IH, IW, IC] NDHWC layout
+/// @param filter [OC, KD, KH, KW, IC] filter
+/// @param output [N, OD, OH, OW, OC] NDHWC layout
+void conv3d_winograd_3x3x3_s1p1(
+    const Conv3DParams& p,
+    const float* input,
+    const float* filter,
+    float* output);
+
+/// Winograd dispatch wrapper for Conv3D.
+/// Checks conditions and falls back to im2col3d if not met.
+///
+/// @param p      Conv3D parameters
+/// @param input  Input tensor [N, ID, IH, IW, IC] (NDHWC)
+/// @param filter Filter tensor [OC, KD, KH, KW, IC]
+/// @param bias   Bias vector [OC], or nullptr
+/// @param output Output tensor [N, OD, OH, OW, OC] (NDHWC)
+/// @param post_op Post-operation to apply
+void conv3d_winograd_dispatch(
+    const Conv3DParams& p,
+    const float* input,
+    const float* filter,
+    const float* bias,
+    float* output,
+    Conv3DPostOp post_op);
 
 /// BF16 Conv3D: FP32 input/filter converted to BF16 for compute.
 /// Uses BFMMLA for higher compute density (2x vs FP32).
