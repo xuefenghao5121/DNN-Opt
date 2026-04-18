@@ -243,12 +243,28 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
         for (int i = 0; i < M; i += 8) {
             int m_tile = std::min(8, M - i);
 
-            // Quantize B tile (K × n_tile)
-            std::vector<int8_t> b_tile(k_padded * n_tile, 0);
-            for (int k = 0; k < K; ++k) {
-                for (int jj = 0; jj < n_tile; ++jj) {
-                    int32_t q = (int32_t)lrintf(B[k * ldb + j + jj] / scale_B);
-                    b_tile[k * n_tile + jj] = std::max(-128, std::min(127, q));
+            // Quantize B tile: SMMLA format [K-group][col-pair]
+            // Each 16 bytes = [col0_k0..k7, col1_k0..k7] for one col-pair
+            // 4 col-pairs per K-group = 64 bytes per K-group
+            int tile_k8 = k_padded / 8;  // K-groups in this tile
+            std::vector<int8_t> b_tile(tile_k8 * 64, 0);
+
+            int b_idx = 0;
+            for (int ki = 0; ki < tile_k8; ++ki) {
+                // Pack 4 col-pairs: (j+0,j+1), (j+2,j+3), (j+4,j+5), (j+6,j+7)
+                for (int cp = 0; cp < 8; cp += 2) {
+                    int c0 = j + cp, c1 = j + cp + 1;
+
+                    for (int kk = 0; kk < 8; ++kk) {
+                        int k = ki * 8 + kk;
+                        float v0 = (k < K && c0 < N) ? B[k * ldb + c0] : 0;
+                        float v1 = (k < K && c1 < N) ? B[k * ldb + c1] : 0;
+                        int32_t q0 = (int32_t)lrintf(v0 / scale_B);
+                        int32_t q1 = (int32_t)lrintf(v1 / scale_B);
+                        b_tile[b_idx + kk] = (int8_t)std::max(-128, std::min(127, q0));
+                        b_tile[b_idx + 8 + kk] = (int8_t)std::max(-128, std::min(127, q1));
+                    }
+                    b_idx += 16;
                 }
             }
 
@@ -263,22 +279,41 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
             int32x4_t c32 = vdupq_n_s32(0), c33 = vdupq_n_s32(0);
 
             // K-loop
-            int k8 = k_padded / 8;
-            const int8_t* a_ptr = &a_i8[i * k_padded];
-            const int8_t* b_ptr = b_tile.data();
+            const int8_t* a_tile_ptr = &a_i8[i * k_padded];  // Base pointer for this M tile
+            const int8_t* b_tile_ptr = b_tile.data();        // Base pointer for this B tile
 
-            for (int ki = 0; ki < k8; ++ki) {
+            for (int ki = 0; ki < tile_k8; ++ki) {
                 // Load A row-pairs (4 vectors for 8 rows)
-                int8x16_t a0 = vld1q_s8(a_ptr + ki * 8);
-                int8x16_t a1 = (m_tile >= 3) ? vld1q_s8(a_ptr + k_padded + ki * 8) : vdupq_n_s8(0);
-                int8x16_t a2 = (m_tile >= 5) ? vld1q_s8(a_ptr + 2*k_padded + ki * 8) : vdupq_n_s8(0);
-                int8x16_t a3 = (m_tile >= 7) ? vld1q_s8(a_ptr + 3*k_padded + ki * 8) : vdupq_n_s8(0);
+                // vmmlaq_s32 expects: [row0_k0..k7, row1_k0..k7]
+                // Need to combine two rows' K values for each row-pair
 
-                // Load B col-pairs
-                int8x16_t b0 = vld1q_s8(b_ptr + ki * n_tile * 8);
-                int8x16_t b1 = (n_tile >= 3) ? vld1q_s8(b_ptr + ki * n_tile * 8 + 16) : vdupq_n_s8(0);
-                int8x16_t b2 = (n_tile >= 5) ? vld1q_s8(b_ptr + ki * n_tile * 8 + 32) : vdupq_n_s8(0);
-                int8x16_t b3 = (n_tile >= 7) ? vld1q_s8(b_ptr + ki * n_tile * 8 + 48) : vdupq_n_s8(0);
+                // Row-pair 0 (rows 0,1): combine row0 and row1 K values
+                int8x8_t a_r0_k = vld1_s8(a_tile_ptr + ki * 8);                           // row0 K[ki*8..ki*8+7]
+                int8x8_t a_r1_k = vld1_s8(a_tile_ptr + k_padded + ki * 8);                 // row1 K[ki*8..ki*8+7]
+                int8x16_t a0 = vcombine_s8(a_r0_k, a_r1_k);                               // [row0_k, row1_k]
+
+                // Row-pair 1 (rows 2,3)
+                int8x8_t a_r2_k = (m_tile >= 3) ? vld1_s8(a_tile_ptr + 2*k_padded + ki * 8) : vdup_n_s8(0);
+                int8x8_t a_r3_k = (m_tile >= 4) ? vld1_s8(a_tile_ptr + 3*k_padded + ki * 8) : vdup_n_s8(0);
+                int8x16_t a1 = vcombine_s8(a_r2_k, a_r3_k);
+
+                // Row-pair 2 (rows 4,5)
+                int8x8_t a_r4_k = (m_tile >= 5) ? vld1_s8(a_tile_ptr + 4*k_padded + ki * 8) : vdup_n_s8(0);
+                int8x8_t a_r5_k = (m_tile >= 6) ? vld1_s8(a_tile_ptr + 5*k_padded + ki * 8) : vdup_n_s8(0);
+                int8x16_t a2 = vcombine_s8(a_r4_k, a_r5_k);
+
+                // Row-pair 3 (rows 6,7)
+                int8x8_t a_r6_k = (m_tile >= 7) ? vld1_s8(a_tile_ptr + 6*k_padded + ki * 8) : vdup_n_s8(0);
+                int8x8_t a_r7_k = (m_tile >= 8) ? vld1_s8(a_tile_ptr + 7*k_padded + ki * 8) : vdup_n_s8(0);
+                int8x16_t a3 = vcombine_s8(a_r6_k, a_r7_k);
+
+                // Load B col-pairs (4 vectors for 8 cols)
+                // Each vector = [col0_k0..k7, col1_k0..k7] for K-group ki
+                // b_tile_ptr + ki * 64 + cp * 16
+                int8x16_t b0 = vld1q_s8(b_tile_ptr + ki * 64);           // cols 0-1 at K-group ki
+                int8x16_t b1 = (n_tile >= 3) ? vld1q_s8(b_tile_ptr + ki * 64 + 16) : vdupq_n_s8(0);  // cols 2-3
+                int8x16_t b2 = (n_tile >= 5) ? vld1q_s8(b_tile_ptr + ki * 64 + 32) : vdupq_n_s8(0);  // cols 4-5
+                int8x16_t b3 = (n_tile >= 7) ? vld1q_s8(b_tile_ptr + ki * 64 + 48) : vdupq_n_s8(0);  // cols 6-7
 
                 // 16 SMMLA
                 c00 = vmmlaq_s32(c00, a0, b0);
@@ -297,8 +332,6 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
                 c31 = vmmlaq_s32(c31, a3, b1);
                 c32 = vmmlaq_s32(c32, a3, b2);
                 c33 = vmmlaq_s32(c33, a3, b3);
-
-                b_ptr += n_tile * 8;
             }
 
             // Dequantize and store

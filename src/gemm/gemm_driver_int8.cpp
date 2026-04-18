@@ -1,6 +1,12 @@
 /// @file gemm_driver_int8.cpp
 /// BLIS-style INT8 GEMM driver with cache blocking, packing, and quantization.
 /// Input/output are FP32; internal computation uses INT8 SMMLA.
+///
+/// Quantization strategy:
+///   - Global per-matrix scale (not per-panel) for consistency
+///   - A_q = round(A / scale_A) where scale_A = max(|A|) / 127
+///   - B_q = round(B / scale_B) where scale_B = max(|B|) / 127
+///   - C = scale_A * scale_B * (A_q * B_q)
 
 #include "dnnopt/gemm/gemm.h"
 #include "dnnopt/gemm/gemm_config.h"
@@ -8,6 +14,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cmath>
 
 #ifdef __ARM_NEON
 #include <arm_neon.h>
@@ -28,6 +35,19 @@ void gemm_ukernel_int8_8x8(int K, const int8_t* packed_A, const int8_t* packed_B
                             float* C, int ldc, float alpha, float beta,
                             float dequant_scale);
 
+/// Compute global quantization scale for entire matrix.
+static float compute_global_quant_scale(const float* data, int rows, int cols, int ld) {
+    float max_abs = 0.0f;
+    for (int i = 0; i < rows; ++i) {
+        for (int j = 0; j < cols; ++j) {
+            float abs_val = std::fabs(data[i * ld + j]);
+            if (abs_val > max_abs) max_abs = abs_val;
+        }
+    }
+    if (max_abs == 0.0f) return 1.0f;
+    return max_abs / 127.0f;
+}
+
 void gemm_driver_int8(int M, int N, int K,
                       float alpha, const float* A, int lda,
                       const float* B, int ldb,
@@ -35,6 +55,11 @@ void gemm_driver_int8(int M, int N, int K,
     constexpr int Mr = kGemmMrInt8;  // 8
     constexpr int Nr = kGemmNrInt8;  // 8
     constexpr int Kgroup = 8;
+
+    // Global quantization scales for entire matrices
+    float scale_A = compute_global_quant_scale(A, M, K, lda);
+    float scale_B = compute_global_quant_scale(B, K, N, ldb);
+    float dequant_scale = scale_A * scale_B;
 
     auto bp = get_gemm_blocking_params();
     int Mc = bp.Mc;
@@ -69,18 +94,16 @@ void gemm_driver_int8(int M, int N, int K,
             float beta_eff = (pc == 0) ? beta : 1.0f;
             float alpha_eff = alpha;
 
-            // Pack B panel with quantization
-            float scale_B;
-            pack_b_int8(kc, nc, &B[pc * ldb + jc], ldb, packed_B.get(), &scale_B);
+            // Pack B panel with pre-computed global scale
+            float scale_B_panel = scale_B;  // Use global scale
+            pack_b_int8(kc, nc, &B[pc * ldb + jc], ldb, packed_B.get(), &scale_B_panel);
 
             for (int ic = 0; ic < M; ic += Mc) {
                 int mc = std::min(Mc, M - ic);
 
-                // Pack A block with quantization
-                float scale_A;
-                pack_a_int8(mc, kc, &A[ic * lda + pc], lda, packed_A.get(), &scale_A);
-
-                float dequant_scale = scale_A * scale_B;
+                // Pack A block with pre-computed global scale
+                float scale_A_panel = scale_A;  // Use global scale
+                pack_a_int8(mc, kc, &A[ic * lda + pc], lda, packed_A.get(), &scale_A_panel);
 
                 int m_panels = (mc + Mr - 1) / Mr;
                 int n_panels = (nc + Nr - 1) / Nr;

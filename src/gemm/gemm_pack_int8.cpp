@@ -76,6 +76,8 @@ static inline int8_t quantize_s8(float val, float inv_scale) {
 ///   [A_q[r0,k0..k7], A_q[r1,k0..k7]]
 ///
 /// Total per K-group: Mr/2 * 16 INT8 = 4 * 16 = 64 bytes
+///
+/// @param scale_A  Pre-computed quantization scale (max(|A|) / 127)
 void pack_a_int8(int m_len, int k_len,
                  const float* A, int lda,
                  int8_t* packed_A, float* scale_A) {
@@ -83,8 +85,13 @@ void pack_a_int8(int m_len, int k_len,
     constexpr int Kgroup = 8;
     int k_padded = (k_len + Kgroup - 1) / Kgroup * Kgroup;
 
-    *scale_A = compute_quant_scale(A, m_len, k_len, lda);
-    float inv_scale = 1.0f / *scale_A;
+    // Use pre-computed scale if provided, otherwise compute locally
+    float scale = *scale_A;
+    if (scale <= 0.0f) {
+        scale = compute_quant_scale(A, m_len, k_len, lda);
+        *scale_A = scale;
+    }
+    float inv_scale = 1.0f / scale;
 
     for (int i = 0; i < m_len; i += Mr) {
         for (int k = 0; k < k_padded; k += Kgroup) {
@@ -112,6 +119,8 @@ void pack_a_int8(int m_len, int k_len,
 ///   SMMLA expects Vm: [k0c0..k7c0, k0c1..k7c1] (column-major within col-pair)
 ///
 /// Total per K-group: Nr/2 * 16 INT8 = 4 * 16 = 64 bytes
+///
+/// @param scale_B  Pre-computed quantization scale (max(|B|) / 127)
 void pack_b_int8(int k_len, int n_len,
                  const float* B, int ldb,
                  int8_t* packed_B, float* scale_B) {
@@ -119,8 +128,13 @@ void pack_b_int8(int k_len, int n_len,
     constexpr int Kgroup = 8;
     int k_padded = (k_len + Kgroup - 1) / Kgroup * Kgroup;
 
-    *scale_B = compute_quant_scale(B, k_len, n_len, ldb);
-    float inv_scale = 1.0f / *scale_B;
+    // Use pre-computed scale if provided, otherwise compute locally
+    float scale = *scale_B;
+    if (scale <= 0.0f) {
+        scale = compute_quant_scale(B, k_len, n_len, ldb);
+        *scale_B = scale;
+    }
+    float inv_scale = 1.0f / scale;
 
     for (int j = 0; j < n_len; j += Nr) {
         for (int k = 0; k < k_padded; k += Kgroup) {
