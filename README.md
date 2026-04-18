@@ -1,6 +1,6 @@
 # DNN-Opt: oneDNN Supplementary Patch for ARM Inference
 
-**Version 0.9.16-dev** | ARM GEMM optimization library, designed as a supplementary patch for oneDNN.
+**Version 0.9.17-dev** | ARM GEMM optimization library, designed as a supplementary patch for oneDNN.
 
 Dnnopt accelerates the matrix shapes where oneDNN underperforms -- small M, irregular N, tall-skinny dimensions -- while falling back to oneDNN for shapes where oneDNN is already near-peak. No code changes required in your inference framework.
 
@@ -316,14 +316,36 @@ dnnopt::gemm_fp32(M, N, K, 1.0f, A, K, B, N, 0.0f, C, N,
 
 ```cpp
 // BF16: auto-converts FP32 inputs to BF16, computes via BFMMLA
+// Small-M (M<=8) uses dedicated BF16 kernel without packing overhead
 dnnopt::gemm_bf16(M, N, K, 1.0f, A_fp32, K, B_fp32, N, 0.0f, C_fp32, N);
 
 // BF16 with native bfloat16 inputs (for oneDNN integration)
 dnnopt::gemm_bf16_bf16bf16f32(M, N, K, 1.0f, A_bf16, K, B_bf16, N, 0.0f, C_fp32, N);
 
 // INT8: auto-quantizes FP32 to INT8, computes via SMMLA
+// Small-M (M<=8) uses dedicated INT8 kernel with dynamic quantization
 dnnopt::gemm_int8(M, N, K, 1.0f, A_fp32, K, B_fp32, N, 0.0f, C_fp32, N);
+
+// FP8: software fallback (converts to FP32, hardware support pending ARMv9-A)
+// E4M3 (precision): for activations/weights, range [-448, 448]
+// E5M2 (range): for gradients/intermediate, supports inf/nan
+if (dnnopt::has_fp8_support()) {
+    dnnopt::gemm_fp8(M, N, K, 1.0f, A_fp32, K, B_fp32, N, 0.0f, C_fp32, N);
+}
 ```
+
+**Supported data types:**
+
+| Type | NEON Kernel | SVE Kernel | Small-M | Hardware Requirement |
+|------|-------------|------------|---------|---------------------|
+| FP32 | 8x12 FMLA | VLA | M=1-7 | ARMv8-A (always) |
+| BF16 | 8x8 BFMMLA | VLA | M=1-8 | ARMv8.6-A BF16 |
+| INT8 | 8x8 SMMLA | VLA | M=1-8 | ARMv8.6-A I8MM |
+| FP8 | (stub) | (stub) | - | ARMv9-A (pending) |
+
+**FP8 formats (ARMv9-A, Neoverse V3/Cortex-X4):**
+- E4M3FN: sign(1) + exp(4) + mantissa(3), range [-448, 448], no inf/nan
+- E5M2: sign(1) + exp(5) + mantissa(2), range [-57K, 57K], supports inf/nan
 
 ### CBLAS Interface (`cblas_sgemm`)
 
@@ -531,6 +553,41 @@ python3 scripts/roofline.py bench_gemm_results.csv 48.0 40.0
 ```
 
 ## Development Log
+
+### v0.9.17-dev -- Data Type Extension: BF16/INT8 Small-M + FP8 Framework (2026-04-18)
+
+Complete multi-precision support with small-M kernels and FP8 framework.
+
+- **NEON-SVE Bridge** (`arm_neon_sve_bridge.h`):
+  - `neon_to_sve_f32()` / `sve_to_neon_f32()` for vector conversion
+  - `prefer_neon_over_sve(M,N,K)` for SVE-128 dispatch decisions
+  - Used when SVE predicate overhead exceeds NEON direct compute
+- **BF16 Small-M kernels** (`gemm_smallm_bf16.cpp`):
+  - M=1: `gemm_mx1_bf16` GEMV with BFMMLA 2-col pairing
+  - M=2-8: `gemm_smallm_bf16_mops` row-pair compute, inline FP32→BF16 conversion
+  - No packing overhead, leverages BFMMLA compute density
+- **INT8 Small-M kernels** (`gemm_smallm_int8.cpp`):
+  - M=1: `gemm_mx1_int8` GEMV with dynamic quantization
+  - M=2-8: `gemm_smallm_int8_smmla` SMMLA with per-tensor scale
+  - Dynamic quantization avoids pre-packing complexity
+- **FP8 Framework** (`gemm_fp8.cpp`, `gemm_types.h`):
+  - `fp8_e4m3_t`: E4M3FN format, range [-448, 448], precision-focused
+  - `fp8_e5m2_t`: E5M2 format, range [-57K, 57K], range-focused (inf/nan)
+  - Software fallback: converts FP8→FP32, uses FP32 GEMM
+  - Hardware check: `has_fp8_support()` for ARMv9-A detection
+  - API ready: `gemm_fp8_e4m3()`, `gemm_fp8_e5m2()`, `gemm_fp8()`
+- **GEMM dispatch integration**:
+  - `gemm_bf16()` calls `gemm_smallm_bf16()` when M≤8 and BF16 hardware
+  - `gemm_int8()` calls `gemm_smallm_int8()` when M≤8 and I8MM hardware
+  - Falls back to FP32 small-M when hardware unavailable
+- **Hardware capabilities**:
+  - Added `kFP8`, `kFP8FMA` flags for ARMv9-A detection
+  - Added FP8 algorithm enums: `kFp8E4m3Fdot`, `kSveFp8E4m3`, etc.
+- **Current data type matrix**:
+  - FP32: Complete (NEON + SVE + Small-M M=1-7)
+  - BF16: Complete (NEON + SVE + Small-M M=1-8)
+  - INT8: Complete (NEON + SVE + Small-M M=1-8)
+  - FP8: Framework ready, hardware support pending (ARMv9-A)
 
 ### v0.9.16-dev -- Phase 13F+OpenBLAS: Shape-based Dispatch with OpenBLAS Fallback (2026-04-18)
 
