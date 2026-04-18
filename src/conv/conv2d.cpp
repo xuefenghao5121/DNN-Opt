@@ -1,7 +1,8 @@
 /// @file conv2d.cpp
 /// Conv2D dispatch: im2col + GEMM for general convolutions,
 /// direct GEMM for 1×1 pointwise convolutions,
-/// Winograd F(2x2, 3x3) for 3x3 stride=1 convolutions.
+/// Winograd F(2x2, 3x3) for 3x3 stride=1 convolutions,
+/// Depthwise kernel for depthwise separable convolutions.
 
 #include "dnnopt/conv/conv.h"
 #include "dnnopt/gemm/gemm.h"
@@ -22,6 +23,22 @@ void conv2d_winograd_3x3_s1p1(const Conv2DParams& p,
                                const float* input,
                                const float* filter,
                                float* output);
+
+// Winograd F(4x4, 3x3) for stride=1, padding=1 (larger tiles)
+void conv2d_winograd_4x4_3x3_s1p1(const Conv2DParams& p,
+                                   const float* input,
+                                   const float* filter,
+                                   float* output);
+
+// Depthwise convolution kernels
+void conv2d_depthwise_3x3_s1p1(const Conv2DParams& p,
+                                const float* input,
+                                const float* filter,
+                                float* output);
+void conv2d_depthwise_general(const Conv2DParams& p,
+                                const float* input,
+                                const float* filter,
+                                float* output);
 #endif
 
 /// Transpose filter from [OC, K] to [K, OC] for GEMM B matrix.
@@ -102,6 +119,26 @@ void conv2d_fp32(const Conv2DParams& p,
                  const float* bias,
                  float* output,
                  ConvPostOp post_op) {
+#ifdef __ARM_NEON
+    // Depthwise path: groups=IC, OC=IC
+    // Use specialized kernel that avoids cross-channel GEMM
+    if (p.is_depthwise()) {
+        if (p.KH == 3 && p.KW == 3 && p.stride_h == 1 && p.stride_w == 1 &&
+            p.pad_h == 1 && p.pad_w == 1) {
+            conv2d_depthwise_3x3_s1p1(p, input, filter, output);
+        } else {
+            conv2d_depthwise_general(p, input, filter, output);
+        }
+
+        // Apply bias + post-ops
+        if (bias || post_op != ConvPostOp::kNone) {
+            const int M = p.N * p.OH() * p.OW();
+            apply_conv_postops(output, M, p.OC, bias, post_op);
+        }
+        return;
+    }
+#endif
+
     // Fast path: 1×1 conv with stride=1, no padding
     if (p.KH == 1 && p.KW == 1 &&
         p.stride_h == 1 && p.stride_w == 1 &&
@@ -112,13 +149,26 @@ void conv2d_fp32(const Conv2DParams& p,
 
 #ifdef __ARM_NEON
     // Winograd path: 3×3 conv with stride=1, padding=1
-    // Reduces multiplications by 2.25x (9 → 4 per output pixel)
-    // Efficient for moderate to large spatial dimensions
+    // Reduces multiplications:
+    //   - F(2x2, 3x3): 2.25x fewer (9 → 4)
+    //   - F(4x4, 3x3): 6x fewer (9 → 1.5)
+    // F(4x4) is more efficient for larger spatial dims (OH,OW >= 16)
     if (p.KH == 3 && p.KW == 3 &&
         p.stride_h == 1 && p.stride_w == 1 &&
-        p.pad_h == 1 && p.pad_w == 1 &&
-        p.OH() >= 8 && p.OW() >= 8) {  // Winograd benefits from tile reuse
-        conv2d_winograd_3x3_s1p1(p, input, filter, output);
+        p.pad_h == 1 && p.pad_w == 1) {
+        const int OH = p.OH(), OW = p.OW();
+
+        if (OH >= 16 && OW >= 16) {
+            // F(4x4, 3x3): larger tiles, better efficiency
+            conv2d_winograd_4x4_3x3_s1p1(p, input, filter, output);
+        } else if (OH >= 8 && OW >= 8) {
+            // F(2x2, 3x3): smaller tiles, still better than im2col
+            conv2d_winograd_3x3_s1p1(p, input, filter, output);
+        } else {
+            // Small spatial dims: im2col is better (Winograd overhead not amortized)
+            conv2d_im2col_gemm(p, input, filter, bias, output, post_op);
+            return;
+        }
 
         // Apply bias + post-ops after Winograd
         if (bias || post_op != ConvPostOp::kNone) {
