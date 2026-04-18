@@ -41,6 +41,14 @@ void conv2d_depthwise_general(const Conv2DParams& p,
                                 float* output);
 #endif
 
+// Grouped convolution kernel (defined in conv_grouped.cpp)
+void conv2d_grouped_fp32(const Conv2DParams& p,
+                          const float* input,
+                          const float* filter,
+                          const float* bias,
+                          float* output,
+                          ConvPostOp post_op);
+
 /// Transpose filter from [OC, K] to [K, OC] for GEMM B matrix.
 static void transpose_filter(const float* filter, float* filter_T,
                               int OC, int K) {
@@ -135,6 +143,13 @@ void conv2d_fp32(const Conv2DParams& p,
             const int M = p.N * p.OH() * p.OW();
             apply_conv_postops(output, M, p.OC, bias, post_op);
         }
+        return;
+    }
+
+    // Grouped path: groups > 1, groups < IC
+    // Used in ResNeXt, ShuffleNet for efficiency
+    if (p.is_grouped()) {
+        conv2d_grouped_fp32(p, input, filter, bias, output, post_op);
         return;
     }
 #endif

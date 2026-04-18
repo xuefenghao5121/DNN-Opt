@@ -81,4 +81,57 @@ void conv2d_depthwise_fp32(const Conv2DParams& p,
                             float* output,
                             ConvPostOp post_op = ConvPostOp::kNone);
 
+/// Grouped convolution (FP32).
+/// Used in ResNeXt, ShuffleNet: groups > 1, groups < IC.
+/// Each group processes IC/groups input channels → OC/groups output channels.
+///
+/// Filter layout: [groups, OC/groups, KH, KW, IC/groups]
+///   - Group g filter: filter[g * (OC/groups * KH * KW * IC/groups) + ...]
+///
+/// @param p      Convolution parameters (must satisfy is_grouped())
+/// @param input  Input tensor [N, IH, IW, IC] (NHWC)
+/// @param filter Filter tensor [groups, OC/groups, KH, KW, IC/groups]
+/// @param bias   Bias vector [OC], or nullptr
+/// @param output Output tensor [N, OH, OW, OC] (NHWC)
+/// @param post_op Post-operation to apply
+void conv2d_grouped_fp32(const Conv2DParams& p,
+                          const float* input,
+                          const float* filter,
+                          const float* bias,
+                          float* output,
+                          ConvPostOp post_op = ConvPostOp::kNone);
+
+/// BF16 Conv2D: input/filter are FP32, converted to BF16 for compute.
+/// Uses BFMMLA for higher compute density (2x vs FP32 FMLA).
+///
+/// @param p      Convolution parameters
+/// @param input  Input tensor [N, IH, IW, IC] (NHWC, FP32)
+/// @param filter Filter tensor [OC, KH, KW, IC] (FP32)
+/// @param bias   Bias vector [OC], or nullptr
+/// @param output Output tensor [N, OH, OW, OC] (NHWC, FP32)
+/// @param post_op Post-operation to apply
+void conv2d_bf16(const Conv2DParams& p,
+                 const float* input,
+                 const float* filter,
+                 const float* bias,
+                 float* output,
+                 ConvPostOp post_op = ConvPostOp::kNone);
+
+/// INT8 Conv2D: input/filter are FP32, dynamically quantized to INT8.
+/// Uses SMMLA for maximum compute density (4x vs FP32 FMLA).
+/// Per-tensor quantization with dynamic scale computation.
+///
+/// @param p      Convolution parameters
+/// @param input  Input tensor [N, IH, IW, IC] (NHWC, FP32)
+/// @param filter Filter tensor [OC, KH, KW, IC] (FP32)
+/// @param bias   Bias vector [OC], or nullptr
+/// @param output Output tensor [N, OH, OW, OC] (NHWC, FP32)
+/// @param post_op Post-operation to apply
+void conv2d_int8(const Conv2DParams& p,
+                 const float* input,
+                 const float* filter,
+                 const float* bias,
+                 float* output,
+                 ConvPostOp post_op = ConvPostOp::kNone);
+
 }  // namespace dnnopt

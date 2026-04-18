@@ -1,0 +1,57 @@
+#pragma once
+/// @file conv3d.h
+/// Public Conv3D API for DNN-Opt (video processing).
+///
+/// Data layouts:
+///   input:  [N, ID, IH, IW, IC] (NDHWC)
+///   filter: [OC, KD, KH, KW, IC] (ODIHW with IC innermost)
+///   bias:   [OC] or nullptr
+///   output: [N, OD, OH, OW, OC] (NDHWC)
+
+#include <cstddef>
+
+namespace dnnopt {
+
+/// Conv3D parameters.
+struct Conv3DParams {
+    int N;             // Batch size
+    int IC;            // Input channels
+    int ID, IH, IW;   // Input: temporal depth, height, width
+    int OC;            // Output channels
+    int KD, KH, KW;   // Kernel: temporal, height, width
+    int stride_d, stride_h, stride_w;
+    int pad_d, pad_h, pad_w;
+
+    /// Output temporal depth.
+    int OD() const { return (ID + 2 * pad_d - KD) / stride_d + 1; }
+
+    /// Output height.
+    int OH() const { return (IH + 2 * pad_h - KH) / stride_h + 1; }
+
+    /// Output width.
+    int OW() const { return (IW + 2 * pad_w - KW) / stride_w + 1; }
+};
+
+/// Post-operation applied after Conv3D.
+enum class Conv3DPostOp {
+    kNone,       // No post-op
+    kRelu,       // max(0, x)
+    kRelu6,      // min(6, max(0, x))
+};
+
+/// FP32 Conv3D with im2col3d + GEMM.
+///
+/// @param p      Conv3D parameters
+/// @param input  Input tensor [N, ID, IH, IW, IC] (NDHWC)
+/// @param filter Filter tensor [OC, KD, KH, KW, IC]
+/// @param bias   Bias vector [OC], or nullptr for no bias
+/// @param output Output tensor [N, OD, OH, OW, OC] (NDHWC)
+/// @param post_op Post-operation to apply
+void conv3d_fp32(const Conv3DParams& p,
+                 const float* input,
+                 const float* filter,
+                 const float* bias,
+                 float* output,
+                 Conv3DPostOp post_op = Conv3DPostOp::kNone);
+
+}  // namespace dnnopt
