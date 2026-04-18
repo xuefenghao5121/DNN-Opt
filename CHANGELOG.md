@@ -12,6 +12,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Correct B matrix layout: [OC, K] column-major for transpose product
   - 4x compute density improvement vs FP32
 
+### Fixed
+- **INT8 Packed GEMM** (`gemm_driver_int8.cpp`, `gemm_pack_int8.cpp`, `gemm_smallm_int8.cpp`)
+  - Global quantization scale instead of per-panel for consistency
+  - Fixed B tile layout: SMMLA format [K-group][col-pair]
+  - Fixed A row-pair loading: combine two rows' K values correctly
+  - Local debug test passes (max_diff=0.008)
+
 ### Changed
 - **Conv3D INT8 Performance**
   - Small-3x3x3: 74 GFLOPS (3.4x vs FP32)
@@ -21,6 +28,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Performance
 - INT8 Conv3D achieves 74-174 GFLOPS on Neoverse N2
 - 2-4x improvement over FP32 baseline
+
+### Known Issues
+- INT8 packed GEMM test program has memory corruption for large shapes
+- Needs further debugging
 
 ### Tests
 - test_conv3d_correctness: 18/18 passed (INT8 SMMLA)
