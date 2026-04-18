@@ -19,7 +19,11 @@
 /// Implementation:
 ///   - im2col3d + GEMM for general kernels
 ///   - BF16: BFMMLA for higher compute density
-///   - INT8: SMMLA with dynamic quantization
+///   - INT8: SMMLA with dynamic quantization + native INT8 GEMM
+///
+/// TODO: Winograd F(2x2, 3x3x3) for temporal+spatial optimization
+///       - Apply spatial Winograd (KH=3, KW=3) per temporal slice
+///       - Combine temporal dimension in final reduction
 
 #include "dnnopt/conv/conv3d.h"
 #include "dnnopt/gemm/gemm.h"
