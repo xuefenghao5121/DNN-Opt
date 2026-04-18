@@ -46,6 +46,17 @@ void gemm_int8(int M, int N, int K,
                const float* B, int ldb,
                float beta, float* C, int ldc);
 
+/// INT8 GEMM with native INT8 input and INT32 output.
+/// A: M×K int8 row-major, B: K×N int8 row-major, C: M×N int32 row-major.
+/// Computes: C = A × B (INT32 accumulation, no dequantization)
+/// User must apply dequant_scale separately: output = C * dequant_scale
+///
+/// @param dequant_scale Combined scale (scale_A * scale_B) for later dequantization
+void gemm_int8_int8int8int32(int M, int N, int K,
+                              const int8_t* A, int lda,
+                              const int8_t* B, int ldb,
+                              int32_t* C, int ldc);
+
 // ============================================================
 // FP8 GEMM (ARMv9-A, requires hardware support)
 // ============================================================

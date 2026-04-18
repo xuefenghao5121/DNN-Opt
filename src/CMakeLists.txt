@@ -36,6 +36,7 @@ add_library(dnnopt_core STATIC
     gemm/gemm_ukernel_int8_neon.cpp
     gemm/gemm_driver_int8.cpp
     gemm/gemm_smallm_int8.cpp
+    gemm/gemm_int8_native.cpp
     gemm/gemm_fp8.cpp
     gemm/gemm_autotune.cpp
     conv/conv2d.cpp

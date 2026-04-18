@@ -4,6 +4,26 @@ All notable changes to DNN-Opt will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.22-dev] - 2026-04-19
+
+### Added
+- **Native INT8 GEMM** (`gemm_int8_native.cpp`)
+  - `gemm_int8_int8int8int32()`: Direct INT8×INT8→INT32 GEMM
+  - No dequantization overhead before compute
+  - Used in Conv3D INT8 for better memory efficiency
+  - TODO: SMMLA optimization for 8×8 tile processing
+
+- **Conv3D Benchmark** (`bench_conv3d.cpp`)
+  - 5 shapes for C3D/I3D video models
+  - FP32, BF16, INT8 performance comparison
+  - BF16 shows 2x improvement (34-106 GFLOPS)
+  - INT8 baseline (scalar), needs SMMLA optimization
+
+### Changed
+- **Conv3D INT8**: Uses native INT8 GEMM instead of dequantize fallback
+  - Reduces memory overhead (no FP32 intermediate buffers)
+  - Correctness verified (18/18 tests passed)
+
 ## [0.9.21-dev] - 2026-04-19
 
 ### Added

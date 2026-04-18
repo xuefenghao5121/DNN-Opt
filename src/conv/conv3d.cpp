@@ -495,26 +495,17 @@ void conv3d_int8(const Conv3DParams& p,
         }
     }
 
-    // For simplicity, dequantize INT8 data back to FP32 and use gemm_fp32
-    // This is correct but not optimal (TODO: direct INT8 SMMLA GEMM)
-    auto col_fp32 = aligned_array<float>((size_t)M * K);
-    auto filter_T_fp32 = aligned_array<float>((size_t)K * OC);
+    // INT32 accumulator buffer
+    auto output_acc = aligned_array<int32_t>((size_t)M * OC);
 
-    // Dequantize col and filter_T
-    float col_scale = input_scale;  // col is derived from input
-    float filter_dequant_scale = filter_scale;
-    for (int i = 0; i < M * K; ++i) {
-        col_fp32.get()[i] = static_cast<float>(col_q.get()[i]) * col_scale;
-    }
-    for (int i = 0; i < K * OC; ++i) {
-        filter_T_fp32.get()[i] = static_cast<float>(filter_T_q.get()[i]) * filter_dequant_scale;
-    }
+    // Direct INT8 GEMM: output_acc[M, OC] = col_q[M, K] × filter_T_q[K, OC]
+    gemm_int8_int8int8int32(M, OC, K, col_q.get(), K, filter_T_q.get(), OC, output_acc.get(), OC);
 
-    // FP32 GEMM: output[M, OC] = col_fp32[M, K] × filter_T_fp32[K, OC]
-    gemm_fp32(M, OC, K,
-              1.0f, col_fp32.get(), K,
-              filter_T_fp32.get(), OC,
-              0.0f, output, OC);
+    // Dequantize to FP32
+    float dequant_scale = input_scale * filter_scale;
+    for (int i = 0; i < M * OC; ++i) {
+        output[i] = static_cast<float>(output_acc.get()[i]) * dequant_scale;
+    }
 
     // Apply bias + post-ops
     if (bias || post_op != Conv3DPostOp::kNone) {

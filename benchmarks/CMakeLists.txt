@@ -13,6 +13,9 @@ target_link_libraries(bench_threading PRIVATE dnnopt_core)
 add_executable(bench_conv bench_conv.cpp)
 target_link_libraries(bench_conv PRIVATE dnnopt_core)
 
+add_executable(bench_conv3d bench_conv3d.cpp)
+target_link_libraries(bench_conv3d PRIVATE dnnopt_core)
+
 add_executable(bench_elementwise bench_elementwise.cpp)
 target_link_libraries(bench_elementwise PRIVATE dnnopt_core)
 
