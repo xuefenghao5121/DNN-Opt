@@ -1,6 +1,7 @@
 /// @file conv2d.cpp
 /// Conv2D dispatch: im2col + GEMM for general convolutions,
-/// direct GEMM for 1×1 pointwise convolutions.
+/// direct GEMM for 1×1 pointwise convolutions,
+/// Winograd F(2x2, 3x3) for 3x3 stride=1 convolutions.
 
 #include "dnnopt/conv/conv.h"
 #include "dnnopt/gemm/gemm.h"
@@ -14,6 +15,14 @@ namespace dnnopt {
 void im2col_nhwc(const Conv2DParams& p, const float* input, float* col);
 void apply_conv_postops(float* output, int num_rows, int OC,
                         const float* bias, ConvPostOp op);
+
+#ifdef __ARM_NEON
+// Winograd F(2x2, 3x3) for stride=1, padding=1
+void conv2d_winograd_3x3_s1p1(const Conv2DParams& p,
+                               const float* input,
+                               const float* filter,
+                               float* output);
+#endif
 
 /// Transpose filter from [OC, K] to [K, OC] for GEMM B matrix.
 static void transpose_filter(const float* filter, float* filter_T,
@@ -100,6 +109,25 @@ void conv2d_fp32(const Conv2DParams& p,
         conv2d_1x1_direct(p, input, filter, bias, output, post_op);
         return;
     }
+
+#ifdef __ARM_NEON
+    // Winograd path: 3×3 conv with stride=1, padding=1
+    // Reduces multiplications by 2.25x (9 → 4 per output pixel)
+    // Efficient for moderate to large spatial dimensions
+    if (p.KH == 3 && p.KW == 3 &&
+        p.stride_h == 1 && p.stride_w == 1 &&
+        p.pad_h == 1 && p.pad_w == 1 &&
+        p.OH() >= 8 && p.OW() >= 8) {  // Winograd benefits from tile reuse
+        conv2d_winograd_3x3_s1p1(p, input, filter, output);
+
+        // Apply bias + post-ops after Winograd
+        if (bias || post_op != ConvPostOp::kNone) {
+            const int M = p.N * p.OH() * p.OW();
+            apply_conv_postops(output, M, p.OC, bias, post_op);
+        }
+        return;
+    }
+#endif
 
     // General path: im2col + GEMM
     conv2d_im2col_gemm(p, input, filter, bias, output, post_op);

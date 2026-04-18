@@ -41,6 +41,7 @@ add_library(dnnopt_core STATIC
     conv/conv2d.cpp
     conv/im2col.cpp
     conv/conv_postops.cpp
+    conv/conv_winograd.cpp
 )
 
 target_include_directories(dnnopt_core PUBLIC

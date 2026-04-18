@@ -1,14 +1,15 @@
 #pragma once
 /// @file gemm_autotune.h
-/// Lightweight runtime auto-tuning for GEMM on unknown ARM CPUs.
+/// Enhanced runtime auto-tuning for GEMM on unknown ARM CPUs.
 ///
-/// When the CPU is not in the built-in tuning profile database,
-/// this module runs a quick micro-benchmark to find near-optimal
-/// cache blocking parameters. The tuned profile is cached for the
-/// session lifetime.
+/// v0.9.18 improvements:
+///   - Expanded search grid (5 candidates, shape-aware)
+///   - Multi-shape testing (large, small, tall-skinny)
+///   - Shape-specific tuning profiles
+///   - Total cost: ~10-15ms for full autotune
 ///
 /// Inspired by autoGEMM's TVM-based auto-tuning, but dramatically
-/// lighter: 3 shapes × 3 parameter sets = 9 trials, <5ms total.
+/// lighter: 5 shapes × 5 parameter sets = 25 trials, <15ms total.
 
 #include "dnnopt/cpu_tuning_profile.h"
 #include "dnnopt/arm_hwcaps.h"
@@ -23,7 +24,7 @@ namespace dnnopt {
 ///   3. If only generic default matched → run micro-benchmark
 ///   4. Cache result → return tuned profile
 ///
-/// Thread-safe. First call may take ~5ms for auto-tuning;
+/// Thread-safe. First call may take ~10-15ms for auto-tuning;
 /// subsequent calls return cached result instantly.
 const CpuTuningProfile& get_autotuned_profile();
 
