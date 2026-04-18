@@ -1,8 +1,22 @@
 # DNN-Opt Roadmap
 
-## Current Version: v0.9.21-dev
+## Current Version: v0.9.22-dev
 
-**Status**: Conv3D BF16/INT8 + Depthwise INT8 + Conv Benchmark expansion
+**Status**: Native INT8 GEMM + Conv3D benchmark
+
+## Completed: v0.9.22 Tasks
+
+### ✅ Direct INT8 GEMM
+- `gemm_int8_int8int8int32()`: INT8×INT8→INT32 compute
+- No dequantization overhead before GEMM
+- Conv3D INT8 uses native INT8 GEMM
+- TODO: SMMLA optimization for 8×8 tile
+
+### ✅ Conv3D Benchmark
+- 5 shapes for C3D/I3D video models
+- FP32/BF16/INT8 performance comparison
+- BF16: 2x improvement (34-106 GFLOPS)
+- INT8: Scalar baseline, needs SMMLA
 
 ## Completed: v0.9.21 Tasks
 
@@ -220,10 +234,10 @@
 
 ## Version Milestones
 
-### v0.9.22 (Next)
-- Conv benchmark BF16/INT8 shapes expansion
-- Direct INT8 SMMLA GEMM (avoid dequantize fallback)
-- Performance optimization for Conv3D
+### v0.9.23 (Next)
+- Conv3D Winograd: F(2x2, 3x3x3) temporal+spatial optimization
+- INT8 SMMLA GEMM: 8×8 tile processing for optimal performance
+- Conv2D grouped Winograd: Per-group optimization
 
 ### v0.10.0 (Major)
 - FP8 kernels when ARMv9-A hardware available
