@@ -34,6 +34,16 @@ void gemm_driver_int8(int M, int N, int K,
                       const float* B, int ldb,
                       float beta, float* C, int ldc);
 
+// Small-M BF16/INT8 kernels (defined in gemm_smallm_bf16.cpp, gemm_smallm_int8.cpp)
+void gemm_smallm_bf16(int M, int N, int K,
+                       float alpha, const float* A, int lda,
+                       const float* B, int ldb,
+                       float beta, float* C, int ldc);
+void gemm_smallm_int8(int M, int N, int K,
+                       float alpha, const float* A, int lda,
+                       const float* B, int ldb,
+                       float beta, float* C, int ldc);
+
 // Tiny GEMM kernels (defined in gemm_tiny_fp32.cpp)
 bool gemm_tiny_dispatch_fp32(int M, int N, int K,
                               float alpha, const float* A, int lda,
@@ -247,12 +257,22 @@ void gemm_bf16(int M, int N, int K,
                float beta, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K <= 0) return;
 
-    // Small-M: memory-bound, FP32 small-M is better
-    if (M <= kGemmMrBf16 / 2) {
 #ifdef __ARM_NEON
+    const auto& hw = detect_arm_hwcaps();
+    bool has_bf16 = (hw.hwcaps & static_cast<uint64_t>(HwCap::kBF16)) != 0;
+
+    // Small-M BF16 kernel: use when BF16 hardware available and M <= 8.
+    // For very small M (M <= 4), FP32 may be faster due to lower conversion overhead,
+    // but for M=5-8, BF16 compute density wins.
+    if (has_bf16 && M <= kGemmMrBf16) {
+        gemm_smallm_bf16(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+
+    // M <= kGemmMrBf16/2 without BF16: FP32 is better (memory-bound, conversion overhead)
+    if (M <= kGemmMrBf16 / 2) {
         gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
-#endif
     }
 
     // Try registry dispatch
@@ -261,13 +281,12 @@ void gemm_bf16(int M, int N, int K,
         return;
 
     // Legacy fallback
-#ifdef __ARM_NEON
-    const auto& hw = detect_arm_hwcaps();
-    if (hw.hwcaps & static_cast<uint64_t>(HwCap::kBF16)) {
+    if (has_bf16) {
         gemm_driver_bf16(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
 #endif
+
     gemm_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
@@ -277,12 +296,22 @@ void gemm_int8(int M, int N, int K,
                float beta, float* C, int ldc) {
     if (M <= 0 || N <= 0 || K <= 0) return;
 
-    // Small-M: quantization overhead not worth it
-    if (M <= kGemmMrInt8 / 2) {
 #ifdef __ARM_NEON
+    const auto& hw = detect_arm_hwcaps();
+    bool has_i8mm = (hw.hwcaps & static_cast<uint64_t>(HwCap::kI8MM)) != 0;
+
+    // Small-M INT8 kernel: use when I8MM hardware available and M <= 8.
+    // For very small M (M <= 4), FP32 may be faster due to quantization overhead,
+    // but for M=5-8, INT8 SMMLA compute density wins.
+    if (has_i8mm && M <= kGemmMrInt8) {
+        gemm_smallm_int8(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+
+    // M <= kGemmMrInt8/2 without I8MM: FP32 is better (memory-bound, quantization overhead)
+    if (M <= kGemmMrInt8 / 2) {
         gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
-#endif
     }
 
     // Try registry dispatch
@@ -291,13 +320,12 @@ void gemm_int8(int M, int N, int K,
         return;
 
     // Legacy fallback
-#ifdef __ARM_NEON
-    const auto& hw = detect_arm_hwcaps();
-    if (hw.hwcaps & static_cast<uint64_t>(HwCap::kI8MM)) {
+    if (has_i8mm) {
         gemm_driver_int8(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
         return;
     }
 #endif
+
     gemm_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
 }
 
