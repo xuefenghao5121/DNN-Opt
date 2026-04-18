@@ -1,8 +1,24 @@
 # DNN-Opt Roadmap
 
-## Current Version: v0.9.18-dev
+## Current Version: v0.9.19-dev
 
-**Status**: Autotuning improvements + Winograd convolution implemented
+**Status**: Depthwise + Winograd F(4x4) implemented, Conv benchmark expanded
+
+## Completed: v0.9.19 Tasks
+
+### ✅ Depthwise Convolution
+- Dedicated kernel for groups=IC (MobileNet-style)
+- NEON vectorized 4-channel processing
+- 3x3 stride=1 pad=1 specialized path
+
+### ✅ Winograd F(4x4, 3x3)
+- 6x fewer multiplications
+- Larger tiles for better amortization
+- Dispatch for OH,OW >= 16
+
+### ✅ Convolution Benchmark
+- 38 shapes (ResNet, MobileNet, EfficientNet, VGG)
+- Winograd test cases
 
 ## Completed: v0.9.18 Tasks
 
@@ -10,7 +26,6 @@
 - Expanded search grid (5 candidates)
 - Multi-shape testing (5 shapes)
 - Shape-specific weighted scoring
-- Total cost: ~10-15ms
 
 ### ✅ Winograd 3x3 Convolution
 - F(2x2, 3x3) algorithm implemented
@@ -173,10 +188,10 @@
 
 ## Version Milestones
 
-### v0.9.19 (Next)
-- Depthwise convolution optimization
-- Winograd F(4x4, 3x3) variant
-- Convolution benchmark expansion
+### v0.9.20 (Next)
+- Grouped convolution (ResNeXt, ShuffleNet)
+- Convolution BF16/INT8 kernels
+- 3D convolution (video processing)
 
 ### v0.10.0 (Major)
 - FP8 kernels when ARMv9-A hardware available

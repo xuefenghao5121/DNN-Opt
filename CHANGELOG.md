@@ -4,6 +4,40 @@ All notable changes to DNN-Opt will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.19-dev] - 2026-04-18
+
+### Added
+- **Depthwise Separable Convolution** (`conv_depthwise.cpp`)
+  - Dedicated kernel for MobileNet/EfficientNet (groups=IC, OC=IC)
+  - Vectorized 4-channel processing with NEON FMLA
+  - 3x3 stride=1 pad=1 specialized path
+  - No im2col overhead (direct sliding window compute)
+  - Fused ReLU/ReLU6 post-ops
+
+- **Winograd F(4x4, 3x3)** (`conv_winograd.cpp`)
+  - 6x fewer multiplications (9 → 1.5 per output pixel)
+  - Larger tiles: 6x6 input → 4x4 output
+  - Better efficiency for VGG/ResNet large spatial dims
+
+### Changed
+- **Conv2D Dispatch Strategy**
+  - Priority: Depthwise → 1x1 → Winograd F(4x4) → F(2x2) → im2col
+  - Winograd F(4x4) for OH,OW >= 16, F(2x2) for >= 8
+  - Depthwise kernel auto-selected for groups=IC
+
+- **Convolution Benchmark Suite** (`bench_conv.cpp`)
+  - Expanded to 38 shapes
+  - Added MobileNetV2, EfficientNet, VGG shapes
+  - Added Winograd test shapes (8x8, 16x16, 32x32)
+  - Added batch-4 inference shapes
+
+### Performance
+- Depthwise 3x3: ~2-3x speedup vs im2col+GEMM for channel-wise compute
+- Winograd F(4x4): ~3x speedup vs F(2x2) for large spatial dims
+
+### Tests
+- test_conv_correctness: Passed
+
 ## [0.9.18-dev] - 2026-04-18
 
 ### Added
