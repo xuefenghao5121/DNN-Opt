@@ -54,4 +54,37 @@ void conv3d_fp32(const Conv3DParams& p,
                  float* output,
                  Conv3DPostOp post_op = Conv3DPostOp::kNone);
 
+/// BF16 Conv3D: FP32 input/filter converted to BF16 for compute.
+/// Uses BFMMLA for higher compute density (2x vs FP32).
+///
+/// @param p      Conv3D parameters
+/// @param input  Input tensor [N, ID, IH, IW, IC] (NDHWC, FP32)
+/// @param filter Filter tensor [OC, KD, KH, KW, IC] (FP32)
+/// @param bias   Bias vector [OC], or nullptr
+/// @param output Output tensor [N, OD, OH, OW, OC] (NDHWC, FP32)
+/// @param post_op Post-operation to apply
+void conv3d_bf16(const Conv3DParams& p,
+                 const float* input,
+                 const float* filter,
+                 const float* bias,
+                 float* output,
+                 Conv3DPostOp post_op = Conv3DPostOp::kNone);
+
+/// INT8 Conv3D: FP32 input/filter dynamically quantized to INT8.
+/// Uses SMMLA for maximum compute density (4x vs FP32).
+/// Per-tensor quantization with dynamic scale computation.
+///
+/// @param p      Conv3D parameters
+/// @param input  Input tensor [N, ID, IH, IW, IC] (NDHWC, FP32)
+/// @param filter Filter tensor [OC, KD, KH, KW, IC] (FP32)
+/// @param bias   Bias vector [OC], or nullptr
+/// @param output Output tensor [N, OD, OH, OW, OC] (NDHWC, FP32)
+/// @param post_op Post-operation to apply
+void conv3d_int8(const Conv3DParams& p,
+                 const float* input,
+                 const float* filter,
+                 const float* bias,
+                 float* output,
+                 Conv3DPostOp post_op = Conv3DPostOp::kNone);
+
 }  // namespace dnnopt

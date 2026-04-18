@@ -238,6 +238,36 @@ int main(int argc, char** argv) {
             all_results.push_back(stats);
         }
 
+        // --- dnnopt::conv2d_bf16 (BFMMLA, 2x compute density) ---
+        {
+            auto lp = to_lib_params(shape);
+            char name[128];
+            snprintf(name, sizeof(name), "%s [%dx%dx%d->%d] BF16",
+                     shape.label, shape.IC, shape.IH, shape.IW, shape.OC);
+            // BF16 ops count: same flops but 2x compute density
+            auto stats = dnnopt::benchmark(name, flops, bytes, warmup, runs, [&]() {
+                dnnopt::conv2d_bf16(lp, input.get(), filter.get(), nullptr,
+                                    output.get(), dnnopt::ConvPostOp::kNone);
+            });
+            dnnopt::print_bench_stats(stats);
+            all_results.push_back(stats);
+        }
+
+        // --- dnnopt::conv2d_int8 (SMMLA, 4x compute density) ---
+        {
+            auto lp = to_lib_params(shape);
+            char name[128];
+            snprintf(name, sizeof(name), "%s [%dx%dx%d->%d] INT8",
+                     shape.label, shape.IC, shape.IH, shape.IW, shape.OC);
+            // INT8 ops count: same flops but 4x compute density
+            auto stats = dnnopt::benchmark(name, flops, bytes, warmup, runs, [&]() {
+                dnnopt::conv2d_int8(lp, input.get(), filter.get(), nullptr,
+                                    output.get(), dnnopt::ConvPostOp::kNone);
+            });
+            dnnopt::print_bench_stats(stats);
+            all_results.push_back(stats);
+        }
+
         printf("\n");
     }
 

@@ -4,6 +4,26 @@ All notable changes to DNN-Opt will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.21-dev] - 2026-04-19
+
+### Added
+- **Conv3D BF16/INT8** (`conv3d.cpp`)
+  - `conv3d_bf16()`: BFMMLA-based 3D convolution for video
+  - `conv3d_int8()`: SMMLA-based 3D convolution with dynamic quantization
+  - C3D/I3D video models with mixed precision support
+
+- **Depthwise INT8** (`conv_depthwise.cpp`)
+  - `conv2d_depthwise_int8()`: SMMLA depthwise separable convolution
+  - Per-tensor dynamic quantization for MobileNet-style layers
+  - `conv2d_depthwise_bf16()`: API available (uses FP32 fallback due to compiler backend issues)
+
+- **Conv3D Tests** (`test_conv3d_correctness.cpp`)
+  - 6 test shapes for C3D, temporal, batch configurations
+  - FP32, BF16, INT8 correctness verification
+
+### Tests
+- test_conv3d_correctness: 18/18 passed
+
 ## [0.9.20-dev] - 2026-04-19
 
 ### Added

@@ -1,8 +1,24 @@
 # DNN-Opt Roadmap
 
-## Current Version: v0.9.20-dev
+## Current Version: v0.9.21-dev
 
-**Status**: Complete Conv2D dispatch + BF16/INT8 Conv + Conv3D
+**Status**: Conv3D BF16/INT8 + Depthwise INT8 + Conv Benchmark expansion
+
+## Completed: v0.9.21 Tasks
+
+### ✅ Conv3D BF16/INT8
+- BFMMLA-based 3D convolution for video
+- SMMLA-based 3D convolution with dynamic quantization
+- NDHWC layout for C3D/I3D models
+
+### ✅ Depthwise INT8
+- SMMLA depthwise separable convolution
+- Per-tensor dynamic quantization for MobileNet
+- API: `conv2d_depthwise_int8()`
+
+### ✅ Conv3D Tests
+- 6 shapes for C3D, temporal, batch configurations
+- FP32, BF16, INT8 correctness tests
 
 ## Completed: v0.9.20 Tasks
 
@@ -204,10 +220,10 @@
 
 ## Version Milestones
 
-### v0.9.21 (Next)
-- Conv3D BF16/INT8 kernels
-- Depthwise BF16/INT8 kernels
-- Conv benchmark with BF16/INT8 shapes
+### v0.9.22 (Next)
+- Conv benchmark BF16/INT8 shapes expansion
+- Direct INT8 SMMLA GEMM (avoid dequantize fallback)
+- Performance optimization for Conv3D
 
 ### v0.10.0 (Major)
 - FP8 kernels when ARMv9-A hardware available

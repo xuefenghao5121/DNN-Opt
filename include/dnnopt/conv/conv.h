@@ -134,4 +134,38 @@ void conv2d_int8(const Conv2DParams& p,
                  float* output,
                  ConvPostOp post_op = ConvPostOp::kNone);
 
+/// BF16 Depthwise separable convolution.
+/// Specialized kernel for groups=IC, OC=IC.
+/// Uses BFMMLA for 2x compute density.
+///
+/// @param p      Convolution parameters (must satisfy is_depthwise())
+/// @param input  Input tensor [N, IH, IW, IC] (NHWC, FP32)
+/// @param filter Filter tensor [IC, KH, KW, 1] (FP32, converted to BF16)
+/// @param bias   Bias vector [IC], or nullptr
+/// @param output Output tensor [N, OH, OW, IC] (NHWC, FP32)
+/// @param post_op Post-operation to apply
+void conv2d_depthwise_bf16(const Conv2DParams& p,
+                            const float* input,
+                            const float* filter,
+                            const float* bias,
+                            float* output,
+                            ConvPostOp post_op = ConvPostOp::kNone);
+
+/// INT8 Depthwise separable convolution.
+/// Specialized kernel for groups=IC, OC=IC.
+/// Uses SMMLA for 4x compute density with dynamic quantization.
+///
+/// @param p      Convolution parameters (must satisfy is_depthwise())
+/// @param input  Input tensor [N, IH, IW, IC] (NHWC, FP32)
+/// @param filter Filter tensor [IC, KH, KW, 1] (FP32, quantized to INT8)
+/// @param bias   Bias vector [IC], or nullptr
+/// @param output Output tensor [N, OH, OW, IC] (NHWC, FP32)
+/// @param post_op Post-operation to apply
+void conv2d_depthwise_int8(const Conv2DParams& p,
+                            const float* input,
+                            const float* filter,
+                            const float* bias,
+                            float* output,
+                            ConvPostOp post_op = ConvPostOp::kNone);
+
 }  // namespace dnnopt
