@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cstdint>
+#include <cmath>
 #include <vector>
 
 #ifdef _OPENMP
@@ -39,6 +40,31 @@ void gemm_driver_generic(int M, int N, int K,
 
     const int a_elem = cfg.packed_a_elem_bytes;
     const int b_elem = cfg.packed_b_elem_bytes;
+
+    // For INT8, compute global quantization scales before blocking.
+    // This ensures consistent dequantization across all panels.
+    float global_scale_A = 1.0f;
+    float global_scale_B = 1.0f;
+    float global_dequant_scale = 1.0f;
+    if (cfg.dtype == GemmDataType::kINT8) {
+        // Compute global scale: max(|matrix|) / 127
+        float max_A = 0.0f, max_B = 0.0f;
+        for (int i = 0; i < M; ++i) {
+            for (int k = 0; k < K; ++k) {
+                float av = std::fabs(A[i * lda + k]);
+                if (av > max_A) max_A = av;
+            }
+        }
+        for (int k = 0; k < K; ++k) {
+            for (int j = 0; j < N; ++j) {
+                float bv = std::fabs(B[k * ldb + j]);
+                if (bv > max_B) max_B = bv;
+            }
+        }
+        global_scale_A = (max_A == 0.0f) ? 1.0f : max_A / 127.0f;
+        global_scale_B = (max_B == 0.0f) ? 1.0f : max_B / 127.0f;
+        global_dequant_scale = global_scale_A * global_scale_B;
+    }
 
     // Panel stride lambdas
     auto a_panel_stride = [&](int kc_padded) -> size_t {
@@ -159,7 +185,7 @@ void gemm_driver_generic(int M, int N, int K,
                 int n_panels = (nc + Nr - 1) / Nr;
 
                 // Pack B for this N-block
-                float scale_B = 1.0f;
+                float scale_B = global_scale_B;  // Use global scale for INT8
                 cfg.pack_b(kc, nc, &B[pc * ldb + jc], ldb,
                            my_packed_B, Nr, &scale_B);
 
@@ -169,12 +195,12 @@ void gemm_driver_generic(int M, int N, int K,
                     int mc = std::min(Mc, M - ic);
 
                     // Pack A for this M-block
-                    float scale_A = 1.0f;
+                    float scale_A = global_scale_A;  // Use global scale for INT8
                     cfg.pack_a(mc, kc, &A[ic * lda + pc], lda,
                                my_packed_A, Mr, &scale_A);
 
-                    float extra = (cfg.dtype == GemmDataType::kINT8)
-                        ? (scale_A * scale_B) : 0.0f;
+                    // For INT8, use global dequant scale (scale_A * scale_B)
+                    float extra = global_dequant_scale;
 
                     int m_panels = (mc + Mr - 1) / Mr;
 
