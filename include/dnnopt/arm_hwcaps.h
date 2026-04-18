@@ -27,6 +27,9 @@ enum HwCap : uint64_t {
     kAES        = 1ULL << 12,  // AES crypto extension
     kSHA256     = 1ULL << 13,  // SHA-256 extension
     kAtomics    = 1ULL << 14,  // LSE atomics (ARMv8.1)
+    // FP8 extensions (ARMv9-A, requires new hardware)
+    kFP8        = 1ULL << 15,  // FP8 arithmetic (E4M3/E5M2 FDOT, F8MatMul)
+    kFP8FMA     = 1ULL << 16,  // FP8 FMA instructions
 };
 
 /// Cache level descriptor.

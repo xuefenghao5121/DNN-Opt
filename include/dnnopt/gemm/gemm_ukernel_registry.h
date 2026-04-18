@@ -13,7 +13,7 @@
 namespace dnnopt {
 
 /// Data type tag for GEMM dispatch.
-enum class GemmDataType { kFP32, kBF16, kINT8 };
+enum class GemmDataType { kFP32, kBF16, kINT8, kFP8_E4M3, kFP8_E5M2 };
 
 // ============================================================
 // Unified microkernel function signatures

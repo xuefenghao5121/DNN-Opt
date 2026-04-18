@@ -46,6 +46,41 @@ void gemm_int8(int M, int N, int K,
                const float* B, int ldb,
                float beta, float* C, int ldc);
 
+// ============================================================
+// FP8 GEMM (ARMv9-A, requires hardware support)
+// ============================================================
+
+/// FP8 E4M3 GEMM: precision-optimized format.
+/// A is FP8 E4M3, B is FP8 E5M2 (mixed precision for better range).
+/// C is FP32 output. Requires ARMv9-A FP8 support.
+///
+/// Note: Returns immediately if hardware doesn't support FP8.
+///       Check with `has_fp8_support()` before calling.
+void gemm_fp8_e4m3(int M, int N, int K,
+                   float alpha, const fp8_e4m3_t* A, int lda,
+                   const fp8_e5m2_t* B, int ldb,
+                   float beta, float* C, int ldc);
+
+/// FP8 E5M2 GEMM: range-optimized format.
+/// Both A and B are FP8 E5M2. C is FP32 output.
+/// Requires ARMv9-A FP8 support.
+void gemm_fp8_e5m2(int M, int N, int K,
+                   float alpha, const fp8_e5m2_t* A, int lda,
+                   const fp8_e5m2_t* B, int ldb,
+                   float beta, float* C, int ldc);
+
+/// FP8 GEMM with FP32 input (auto-quantize).
+/// Input A/B are FP32, converted to FP8 E4M3/E5M2 internally.
+/// Requires ARMv9-A FP8 support.
+void gemm_fp8(int M, int N, int K,
+              float alpha, const float* A, int lda,
+              const float* B, int ldb,
+              float beta, float* C, int ldc);
+
+/// Check if FP8 hardware support is available.
+/// Returns true if __ARM_FEATURE_FP8 is defined and runtime check passes.
+bool has_fp8_support();
+
 /// Set the number of threads for GEMM operations.
 /// n=0: auto (use all cores), n=1: single-threaded.
 void gemm_set_num_threads(int n);
