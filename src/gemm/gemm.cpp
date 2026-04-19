@@ -10,9 +10,11 @@
 #include "dnnopt/arm_hwcaps.h"
 #include "dnnopt/cpu_tuning_profile.h"
 
+#include <cstdlib>  // for getenv
+
 namespace dnnopt {
 
-// Legacy drivers (preserved for fallback)
+// Forward declarations
 void gemm_driver_fp32(int M, int N, int K,
                       float alpha, const float* A, int lda,
                       const float* B, int ldb,
@@ -51,6 +53,16 @@ bool gemm_tiny_dispatch_fp32(int M, int N, int K,
                               float beta, float* C, int ldc);
 
 namespace {
+
+/// Check if autotune mode is enabled.
+/// Controlled by environment variable DNNOPT_AUTOTUNE=1.
+static bool is_autotune_enabled() {
+    static bool enabled = []() {
+        const char* env = std::getenv("DNNOPT_AUTOTUNE");
+        return env != nullptr && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
+    }();
+    return enabled;
+}
 
 /// Naive FP32 GEMM: C = alpha * A * B + beta * C
 void gemm_naive_fp32(int M, int N, int K,
@@ -155,6 +167,36 @@ void gemm_fp32(int M, int N, int K,
             return;
         }
 #endif
+
+        // Autotune-guided dispatch (if enabled via DNNOPT_AUTOTUNE=1)
+        if (is_autotune_enabled()) {
+            GemmKernelId kid = select_gemm_kernel(M, N, K, GemmDataType::kFP32);
+#ifdef __ARM_NEON
+            switch (kid) {
+            case GemmKernelId::kTiny:
+                // Already handled above, but just in case
+                if (gemm_tiny_dispatch_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc))
+                    return;
+                break;
+            case GemmKernelId::kSmallM:
+                gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+                return;
+            case GemmKernelId::kSmallMWide:
+                gemm_smallm_wide_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+                return;
+            case GemmKernelId::kAdaptiveTile:
+                gemm_adaptive_tile_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+                return;
+            case GemmKernelId::kPacked:
+                if (dispatch_via_registry(GemmDataType::kFP32, M, N, K,
+                                          alpha, A, lda, B, ldb, beta, C, ldc))
+                    return;
+                // Fallback to adaptive tile if registry failed
+                gemm_adaptive_tile_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+                return;
+            }
+#endif
+        }
 
         // Small-M uses dedicated fast path (no packing)
         // Phase B: M=2-7 with large N use wide driver (48-col macro-tiling + Kc blocking).

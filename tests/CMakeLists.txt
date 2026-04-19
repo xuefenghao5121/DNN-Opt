@@ -20,6 +20,10 @@ if(DNNOPT_BUILD_TESTS)
     target_link_libraries(test_elementwise_correctness PRIVATE dnnopt_core)
     add_test(NAME test_elementwise_correctness COMMAND test_elementwise_correctness)
 
+    add_executable(test_autotune test_autotune.cpp)
+    target_link_libraries(test_autotune PRIVATE dnnopt_core)
+    add_test(NAME test_autotune COMMAND test_autotune)
+
     if(DNNOPT_BUILD_BLAS)
         add_executable(test_cblas test_cblas.cpp)
         target_link_libraries(test_cblas PRIVATE dnnopt_blas)

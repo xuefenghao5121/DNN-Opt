@@ -3,6 +3,7 @@ add_library(dnnopt_core STATIC
     utils/timer.cpp
     utils/aligned_alloc.cpp
     cpu_tuning_profiles.cpp
+    autotune/shape_cache.cpp
     gemm/gemm.cpp
     gemm/gemm_ukernel_registry.cpp
     gemm/gemm_driver_generic.cpp

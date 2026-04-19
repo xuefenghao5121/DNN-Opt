@@ -8,11 +8,18 @@
 ///   - Shape-specific tuning profiles
 ///   - Total cost: ~10-15ms for full autotune
 ///
+/// v0.9.28 improvements:
+///   - Kernel selection autotune (small-M vs packed vs adaptive)
+///   - ShapeCache integration for persistent kernel choices
+///   - Built-in profiles + file cache + online fallback
+///
 /// Inspired by autoGEMM's TVM-based auto-tuning, but dramatically
 /// lighter: 5 shapes × 5 parameter sets = 25 trials, <15ms total.
 
 #include "dnnopt/cpu_tuning_profile.h"
 #include "dnnopt/arm_hwcaps.h"
+#include "dnnopt/autotune/shape_cache.h"
+#include "dnnopt/gemm/gemm_ukernel_registry.h"  // for GemmDataType
 
 namespace dnnopt {
 
@@ -30,5 +37,35 @@ const CpuTuningProfile& get_autotuned_profile();
 
 /// Force re-running auto-tune (e.g., after CPU migration in VM).
 void reset_autotune_cache();
+
+// ============================================================
+// v0.9.28: Kernel Selection Autotune
+// ============================================================
+
+/// Select optimal GEMM kernel for given shape.
+/// Uses ShapeCache + micro-benchmark fallback.
+///
+/// @param M, N, K   Matrix dimensions
+/// @param dtype     Data type (FP32, BF16, INT8)
+/// @return          Optimal kernel ID
+GemmKernelId select_gemm_kernel(int M, int N, int K, GemmDataType dtype);
+
+/// Warmup GEMM autotune for common shapes.
+/// Runs micro-benchmarks and populates cache.
+///
+/// @param shapes    Array of shapes to warmup (nullptr = use defaults)
+/// @param n_shapes  Number of shapes
+void warmup_gemm_autotune(const int* shapes_M = nullptr,
+                          const int* shapes_N = nullptr,
+                          const int* shapes_K = nullptr,
+                          int n_shapes = 0);
+
+/// Load GEMM kernel cache from file.
+/// Returns number of entries loaded, -1 on error.
+int load_gemm_kernel_cache(const char* path);
+
+/// Save GEMM kernel cache to file.
+/// Returns 0 on success, -1 on error.
+int save_gemm_kernel_cache(const char* path);
 
 }  // namespace dnnopt
