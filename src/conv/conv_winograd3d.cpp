@@ -131,7 +131,7 @@ static inline void winograd_input_transform_4x4(
     const float* input_tile,  // [4x4] row-major
     float* U) {               // [4x4] output (16 elements)
 
-    // Load 4x4 input tile
+    // Load 4x4 input tile (d[row][col] indexed as input_tile[row*4 + col])
     float d00 = input_tile[0];
     float d01 = input_tile[1];
     float d02 = input_tile[2];
@@ -150,24 +150,33 @@ static inline void winograd_input_transform_4x4(
     float d33 = input_tile[15];
 
     // B^T * d (row transformation)
-    // B^T = [[1,  0,  0,  0],
-    //        [0,  1, -1,  1],
-    //        [-1, 1,  1,  0],
-    //        [0,  0,  0, -1]]
+    // B^T = [[   1,    0,   -1,    0],
+    //        [   0,    1,    1,    0],
+    //        [   0,   -1,    1,    0],
+    //        [   0,    1,    0,   -1]]
     float Bd[4][4];
-    Bd[0][0] = d00; Bd[0][1] = d01; Bd[0][2] = d02; Bd[0][3] = d03;  // Row 0: identity
-    Bd[1][0] = d10 - d20; Bd[1][1] = d11 - d21; Bd[1][2] = d12 - d22; Bd[1][3] = d13 - d23;  // Row 1
-    Bd[2][0] = -d00 + d10 + d20; Bd[2][1] = -d01 + d11 + d21; Bd[2][2] = -d02 + d12 + d22; Bd[2][3] = -d03 + d13 + d23;  // Row 2
-    Bd[3][0] = d30; Bd[3][1] = d31; Bd[3][2] = d32; Bd[3][3] = d33;  // Row 3: identity with negation
+    // Row 0 of B^T: [1, 0, -1, 0] -> Bd[0] = d[0] - d[2]
+    Bd[0][0] = d00 - d20; Bd[0][1] = d01 - d21; Bd[0][2] = d02 - d22; Bd[0][3] = d03 - d23;
+    // Row 1 of B^T: [0, 1, 1, 0] -> Bd[1] = d[1] + d[2]
+    Bd[1][0] = d10 + d20; Bd[1][1] = d11 + d21; Bd[1][2] = d12 + d22; Bd[1][3] = d13 + d23;
+    // Row 2 of B^T: [0, -1, 1, 0] -> Bd[2] = -d[1] + d[2] = d[2] - d[1]
+    Bd[2][0] = d20 - d10; Bd[2][1] = d21 - d11; Bd[2][2] = d22 - d12; Bd[2][3] = d23 - d13;
+    // Row 3 of B^T: [0, 1, 0, -1] -> Bd[3] = d[1] - d[3]
+    Bd[3][0] = d10 - d30; Bd[3][1] = d11 - d31; Bd[3][2] = d12 - d32; Bd[3][3] = d13 - d33;
 
     // (B^T * d) * B (column transformation)
-    // B = [[1,  0, -1,  0],
-    //      [0,  1,  1,  0],
-    //      [0, -1,  1,  0],
-    //      [0,  1,  0, -1]]
+    // B = transpose(B^T) = [[   1,    0,    0,    0],
+    //                       [   0,    1,   -1,    1],
+    //                       [  -1,    1,    1,    0],
+    //                       [   0,    0,    0,   -1]]
+    // Columns of B (same as rows of B^T due to transpose):
+    // Col 0: [1, 0, -1, 0]    -> U[i][0] = Bd[i][0] - Bd[i][2]
+    // Col 1: [0, 1, 1, 0]     -> U[i][1] = Bd[i][1] + Bd[i][2]
+    // Col 2: [0, -1, 1, 0]    -> U[i][2] = -Bd[i][1] + Bd[i][2]
+    // Col 3: [0, 1, 0, -1]    -> U[i][3] = Bd[i][1] - Bd[i][3]
     for (int i = 0; i < 4; ++i) {
         U[i*4 + 0] = Bd[i][0] - Bd[i][2];
-        U[i*4 + 1] = Bd[i][1] - Bd[i][2];
+        U[i*4 + 1] = Bd[i][1] + Bd[i][2];
         U[i*4 + 2] = -Bd[i][1] + Bd[i][2];
         U[i*4 + 3] = Bd[i][1] - Bd[i][3];
     }
@@ -305,17 +314,20 @@ void conv3d_winograd_3x3x3_s1p1(
                         // Accumulate over input channels for this temporal slice
                         for (int ic = 0; ic < IC; ++ic) {
                             // Extract 4x4 input tile at this (id, spatial position)
+                            // For Winograd F(2x2, 3x3) with pad=1, stride=1:
+                            // Input tile for output positions (oh, ow) covers:
+                            // oh-1 to oh+2, ow-1 to ow+2 (4x4 tile for 3x3 kernel)
                             float U_tile[16];
                             for (int i = 0; i < 4; ++i) {
                                 for (int j = 0; j < 4; ++j) {
-                                    const int in_h = out_h_base + i;  // stride=1, pad=1
-                                    const int in_w = out_w_base + j;
+                                    const int in_h = out_h_base - 1 + i;  // offset by -1 for pad=1
+                                    const int in_w = out_w_base - 1 + j;
 
-                                    if (in_h < padded_H && in_w < padded_W) {
+                                    if (in_h >= 0 && in_h < IH && in_w >= 0 && in_w < IW) {
                                         U_tile[i * 4 + j] = padded_input.get()
                                             [(((n * ID + id) * padded_H + in_h) * padded_W + in_w) * IC + ic];
                                     } else {
-                                        U_tile[i * 4 + j] = 0.0f;
+                                        U_tile[i * 4 + j] = 0.0f;  // zero-padding
                                     }
                                 }
                             }

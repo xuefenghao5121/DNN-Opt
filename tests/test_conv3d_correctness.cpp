@@ -175,6 +175,47 @@ void test_conv3d_int8(const Conv3DTestParams& p) {
     TEST_ASSERT(md < tol, msg);
 }
 
+/// Test Conv3D Winograd vs reference (only for 3x3x3, stride=1, pad=1)
+void test_conv3d_winograd(const Conv3DTestParams& p) {
+    int OD = p.OD(), OH = p.OH(), OW = p.OW();
+
+    // Winograd only supports 3x3x3 kernel, stride=1, pad=1
+    if (p.KD != 3 || p.KH != 3 || p.KW != 3) return;
+    if (p.stride_d != 1 || p.stride_h != 1 || p.stride_w != 1) return;
+    if (p.pad_d != 1 || p.pad_h != 1 || p.pad_w != 1) return;
+    // Need OH >= 4, OW >= 4 for Winograd to be dispatched
+    if (OH < 4 || OW < 4) return;
+
+    size_t in_sz = (size_t)p.N * p.ID * p.IH * p.IW * p.IC;
+    size_t flt_sz = (size_t)p.OC * p.KD * p.KH * p.KW * p.IC;
+    size_t out_sz = (size_t)p.N * OD * OH * OW * p.OC;
+
+    auto input = dnnopt::aligned_array<float>(in_sz);
+    auto filter = dnnopt::aligned_array<float>(flt_sz);
+    auto out_ref = dnnopt::aligned_array<float>(out_sz);
+    auto out_win = dnnopt::aligned_array<float>(out_sz);
+
+    fill_random(input.get(), in_sz, 42);
+    fill_random(filter.get(), flt_sz, 123);
+
+    // Reference
+    conv3d_ref(p, input.get(), filter.get(), nullptr, out_ref.get());
+
+    // Winograd
+    auto lp = to_lib_params(p);
+    dnnopt::conv3d_winograd_dispatch(lp, input.get(), filter.get(), nullptr,
+                                     out_win.get(), dnnopt::Conv3DPostOp::kNone);
+
+    // Winograd should have similar precision as FP32 (slightly higher due to transform)
+    float tol = (float)(p.IC * p.KD * p.KH * p.KW) * 2e-4f;
+    float md = max_diff(out_ref.get(), out_win.get(), out_sz);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg), "Conv3D %s Winograd max_diff=%.6e tol=%.6e",
+             p.label, md, tol);
+    TEST_ASSERT(md < tol, msg);
+}
+
 }  // namespace
 
 int main() {
@@ -212,6 +253,19 @@ int main() {
     printf("\n--- Conv3D INT8 vs ref ---\n");
     for (const auto& t : tests) {
         test_conv3d_int8(t);
+    }
+
+    // Section 4: Winograd tests (only for 3x3x3, stride=1, pad=1, OH>=4, OW>=4)
+    printf("\n--- Conv3D Winograd vs ref ---\n");
+    const Conv3DTestParams winograd_tests[] = {
+        // Winograd-compatible shapes (OH >= 4, OW >= 4)
+        {1, 3, 3, 8, 8, 4, 3, 3, 3, 1, 1, 1, 1, 1, 1, "winograd-small"},
+        {1, 8, 5, 8, 8, 16, 3, 3, 3, 1, 1, 1, 1, 1, 1, "winograd-medium"},
+        {1, 16, 5, 16, 16, 32, 3, 3, 3, 1, 1, 1, 1, 1, 1, "winograd-large"},
+        {2, 4, 4, 8, 8, 8, 3, 3, 3, 1, 1, 1, 1, 1, 1, "winograd-batch"},
+    };
+    for (const auto& t : winograd_tests) {
+        test_conv3d_winograd(t);
     }
 
     TEST_SUMMARY();
