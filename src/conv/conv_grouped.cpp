@@ -197,7 +197,7 @@ void conv2d_grouped_fp32(const Conv2DParams& p,
             p_g.IC = IC_g;
             p_g.OC = OC_g;
 
-            // Extract input for this group
+            // Extract input for this group (contiguous IC_g channels)
             auto input_g = aligned_array<float>((size_t)N * p.IH * p.IW * IC_g);
             for (int idx = 0; idx < N * p.IH * p.IW; ++idx) {
                 for (int ic = 0; ic < IC_g; ++ic) {
@@ -205,13 +205,34 @@ void conv2d_grouped_fp32(const Conv2DParams& p,
                 }
             }
 
+            // Remap filter to OIHW layout [OC_g, KH, KW, IC_g]
+            // Explicit grouped layout: [groups, OC_g, KH, KW, IC_g]
+            // Winograd expects: [OC_g, KH, KW, IC_g]
+            auto filter_g_oihw = aligned_array<float>((size_t)OC_g * KH * KW * IC_g);
+            for (int oc_g = 0; oc_g < OC_g; ++oc_g) {
+                for (int kh = 0; kh < KH; ++kh) {
+                    for (int kw = 0; kw < KW; ++kw) {
+                        for (int ic_g = 0; ic_g < IC_g; ++ic_g) {
+                            // Explicit grouped: [g, oc_g, kh, kw, ic_g]
+                            // Index: g * OC_g * K + oc_g * K + kh * KW * IC_g + kw * IC_g + ic_g
+                            // Where K = KH * KW * IC_g
+                            int src_idx = oc_g * K + kh * KW * IC_g + kw * IC_g + ic_g;
+                            // OIHW: [oc_g, kh, kw, ic_g]
+                            // Index: ((oc_g * KH + kh) * KW + kw) * IC_g + ic_g
+                            int dst_idx = ((oc_g * KH + kh) * KW + kw) * IC_g + ic_g;
+                            filter_g_oihw.get()[dst_idx] = filter_g[src_idx];
+                        }
+                    }
+                }
+            }
+
             // Temporary output buffer for this group (will scatter to final output)
             auto output_g_buf = aligned_array<float>((size_t)N * OH * OW * OC_g);
 
             if (OH >= 16 && OW >= 16) {
-                conv2d_winograd_4x4_3x3_s1p1(p_g, input_g.get(), filter_g, output_g_buf.get());
+                conv2d_winograd_4x4_3x3_s1p1(p_g, input_g.get(), filter_g_oihw.get(), output_g_buf.get());
             } else if (OH >= 8 && OW >= 8) {
-                conv2d_winograd_3x3_s1p1(p_g, input_g.get(), filter_g, output_g_buf.get());
+                conv2d_winograd_3x3_s1p1(p_g, input_g.get(), filter_g_oihw.get(), output_g_buf.get());
             } else {
                 // Fallback: im2col + GEMM for small spatial dims
                 auto col = aligned_array<float>((size_t)N * OH * OW * K);

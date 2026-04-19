@@ -249,26 +249,6 @@ void conv2d_winograd_3x3_s1p1(
     const int OC = p.OC;
     const int OH = p.OH(), OW = p.OW();
 
-    // Pad input to handle 4x4 tile boundaries
-    const int padded_H = ((OH + 1) / 2) * 2 + 2;  // OH tiles * 2 + 2 for overlap
-    const int padded_W = ((OW + 1) / 2) * 2 + 2;
-
-    // Allocate padded input buffer
-    auto padded_input = aligned_array<float>((size_t)N * padded_H * padded_W * IC);
-    std::memset(padded_input.get(), 0, N * padded_H * padded_W * IC * sizeof(float));
-
-    // Copy input to padded buffer with zero-padding
-    for (int n = 0; n < N; ++n) {
-        for (int h = 0; h < IH; ++h) {
-            for (int w = 0; w < IW; ++w) {
-                for (int c = 0; c < IC; ++c) {
-                    padded_input.get()[((n * padded_H + h) * padded_W + w) * IC + c] =
-                        input[((n * IH + h) * IW + w) * IC + c];
-                }
-            }
-        }
-    }
-
     // Allocate transformed filter buffer [OC, IC, 4, 4]
     auto transformed_filter = aligned_array<float>((size_t)OC * IC * 16);
 
@@ -292,9 +272,6 @@ void conv2d_winograd_3x3_s1p1(
     const int tile_H = (OH + 1) / 2;
     const int tile_W = (OW + 1) / 2;
 
-    // Allocate transformed input buffer [4, 4] per tile
-    float U_tile[16];
-
     // Allocate transformed output buffer
     auto M_tile = aligned_array<float>((size_t)OC * 16);
 
@@ -303,33 +280,54 @@ void conv2d_winograd_3x3_s1p1(
             for (int tw = 0; tw < tile_W; ++tw) {
                 const int out_h_base = th * 2;
                 const int out_w_base = tw * 2;
-                const int in_h_base = out_h_base;  // stride=1, pad=1
-                const int in_w_base = out_w_base;
+                const int in_h_base = out_h_base - 1;  // stride=1, pad=1, need -1 offset
+                const int in_w_base = out_w_base - 1;
 
                 // Clear M_tile for accumulation
                 std::memset(M_tile.get(), 0, OC * 16 * sizeof(float));
 
                 // Accumulate over input channels
                 for (int ic = 0; ic < IC; ++ic) {
-                    // Extract 4x4 input tile
+                    // Extract 4x4 input tile from original input with bounds check
+                    float d_tile[16];
                     for (int i = 0; i < 4; ++i) {
                         for (int j = 0; j < 4; ++j) {
                             const int in_h = in_h_base + i;
                             const int in_w = in_w_base + j;
                             float val = 0.0f;
-                            if (in_h < IH && in_w < IW) {
-                                val = padded_input.get()
-                                    [((n * padded_H + in_h) * padded_W + in_w) * IC + ic];
+                            if (in_h >= 0 && in_h < IH && in_w >= 0 && in_w < IW) {
+                                val = input[((n * IH + in_h) * IW + in_w) * IC + ic];
                             }
-                            U_tile[i * 4 + j] = val;
+                            d_tile[i * 4 + j] = val;
                         }
                     }
 
-                    // Input transform: B^T * U * B
-                    // (simplified for 4x4 tile)
-                    // Full implementation would use NEON batch transform
+                    // Input transform: U = B^T * d * B
+                    // B^T = [[1, 0, -1, 0],
+                    //        [0, 1,  1, 0],
+                    //        [0, -1, 1, 0],
+                    //        [0, 1,  0, -1]]
+                    float Bd[4][4];
+                    for (int jj = 0; jj < 4; ++jj) {
+                        Bd[0][jj] = d_tile[0*4 + jj] - d_tile[2*4 + jj];
+                        Bd[1][jj] = d_tile[1*4 + jj] + d_tile[2*4 + jj];
+                        Bd[2][jj] = d_tile[2*4 + jj] - d_tile[1*4 + jj];
+                        Bd[3][jj] = d_tile[1*4 + jj] - d_tile[3*4 + jj];
+                    }
 
-                    // Accumulate: M += U_tile * transformed_filter
+                    // B = [[1,  0,  0,  0],
+                    //      [0,  1, -1,  1],
+                    //      [-1, 1,  1,  0],
+                    //      [0,  0,  0, -1]]
+                    float U_tile[16];
+                    for (int ii = 0; ii < 4; ++ii) {
+                        U_tile[ii*4 + 0] = Bd[ii][0] - Bd[ii][2];
+                        U_tile[ii*4 + 1] = Bd[ii][1] + Bd[ii][2];
+                        U_tile[ii*4 + 2] = -Bd[ii][1] + Bd[ii][2];
+                        U_tile[ii*4 + 3] = Bd[ii][1] - Bd[ii][3];
+                    }
+
+                    // Accumulate: M += U_tile * transformed_filter (element-wise)
                     for (int oc = 0; oc < OC; ++oc) {
                         const float* GgGT = &transformed_filter.get()[(oc * IC + ic) * 16];
                         for (int idx = 0; idx < 16; ++idx) {
@@ -506,6 +504,8 @@ void conv2d_winograd_4x4_3x3_s1p1(
             for (int tw = 0; tw < tile_W; ++tw) {
                 const int out_h_base = th * 4;
                 const int out_w_base = tw * 4;
+                const int in_h_base = out_h_base - 1;  // stride=1, pad=1, need -1 offset
+                const int in_w_base = out_w_base - 1;
 
                 // Clear M_tile
                 std::memset(M_tile.get(), 0, OC * 36 * sizeof(float));
@@ -516,8 +516,8 @@ void conv2d_winograd_4x4_3x3_s1p1(
                     float U_tile[36];
                     for (int i = 0; i < 6; ++i) {
                         for (int j = 0; j < 6; ++j) {
-                            const int in_h = out_h_base + i;
-                            const int in_w = out_w_base + j;
+                            const int in_h = in_h_base + i;
+                            const int in_w = in_w_base + j;
                             float val = 0.0f;
                             if (in_h >= 0 && in_h < IH && in_w >= 0 && in_w < IW) {
                                 val = input[((n * IH + in_h) * IW + in_w) * IC + ic];
