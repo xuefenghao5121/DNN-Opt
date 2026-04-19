@@ -30,6 +30,27 @@ namespace dnnopt {
 #ifdef __ARM_NEON
 
 // ============================================================
+// Edge tile store helper
+// ============================================================
+
+/// Store partial tile results with n_tile boundary check.
+/// Beta is already applied to C, so we just add vals.
+static inline void store_edge_tile_row(
+    float* C_row, int n_tile,
+    float32x4_t row_lo, float32x4_t row_hi) {
+    // Extract scalar values from vectors (already scaled)
+    float vals[8];
+    vst1q_f32(vals, row_lo);
+    vst1q_f32(vals + 4, row_hi);
+
+    // Store only valid elements (n_tile <= 8)
+    // Beta is already applied, so just add vals[c] to C_row[c]
+    for (int c = 0; c < n_tile && c < 8; ++c) {
+        C_row[c] += vals[c];
+    }
+}
+
+// ============================================================
 // Dynamic quantization helpers
 // ============================================================
 
@@ -173,22 +194,12 @@ void gemm_mx1_int8(int K, int N,
 
 /// INT8 small-M kernel for M=2-8 using SMMLA.
 /// Requires ARMv8.6-A I8MM support.
-/// NOTE: Currently only handles N multiple of 8 (edge tiles need more work).
+/// Handles edge tiles for both M and N dimensions.
 void gemm_smallm_int8_smmla(int M, int N, int K,
                               float alpha, const float* A, int lda,
                               const float* B, int ldb,
                               float beta, float* C, int ldc) {
 #if defined(__ARM_FEATURE_MATMUL_INT8)
-    // Edge tile handling is incomplete - fall back to FP32 for non-multiple of 8
-    if (N % 8 != 0) {
-        extern void gemm_smallm_driver_fp32(int M, int N, int K,
-                                             float alpha, const float* A, int lda,
-                                             const float* B, int ldb,
-                                             float beta, float* C, int ldc);
-        gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
-        return;
-    }
-
     // Compute quantization scales: max(|A|) / 127, max(|B|) / 127
     // A is M×K row-major: iterate M rows, each row has K elements
     // B is K×N row-major: iterate K rows, each row has N elements
@@ -228,7 +239,7 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
     int b_buf_size = k_padded / 8 * 64;  // One tile's worth
     std::vector<int8_t> b_i8(b_buf_size, 0);
 
-    // Initialize C with beta
+    // Initialize C with beta (same as original)
     if (beta != 1.0f) {
         for (int i = 0; i < M; ++i) {
             for (int j = 0; j < N; ++j) {
@@ -363,14 +374,16 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
                 float* Cr0 = C + (i + 0) * ldc + j;
                 float* Cr1 = C + (i + 1) * ldc + j;
 
-                if (beta == 0.0f) {
-                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
-                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
+                // Use vector store for full tiles, edge helper for partial
+                if (n_tile == 8) {
+                    // Beta already applied, just add vals
+                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), vdupq_n_f32(1.0f), row0_lo));
+                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), vdupq_n_f32(1.0f), row0_hi));
+                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), vdupq_n_f32(1.0f), row1_lo));
+                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), vdupq_n_f32(1.0f), row1_hi));
                 } else {
-                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
-                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
-                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
-                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                    store_edge_tile_row(Cr0, n_tile, row0_lo, row0_hi);
+                    store_edge_tile_row(Cr1, n_tile, row1_lo, row1_hi);
                 }
             }
 
@@ -392,19 +405,19 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
                 float* Cr0 = C + (i + 2) * ldc + j;
                 float* Cr1 = C + (i + 3) * ldc + j;
 
-                if (beta == 0.0f) {
-                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
-                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
+                if (n_tile == 8) {
+                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), vdupq_n_f32(1.0f), row0_lo));
+                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), vdupq_n_f32(1.0f), row0_hi));
+                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), vdupq_n_f32(1.0f), row1_lo));
+                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), vdupq_n_f32(1.0f), row1_hi));
                 } else {
-                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
-                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
-                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
-                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                    store_edge_tile_row(Cr0, n_tile, row0_lo, row0_hi);
+                    store_edge_tile_row(Cr1, n_tile, row1_lo, row1_hi);
                 }
             }
 
             // Store row-pair 2 (rows i+4, i+5)
-            if (m_tile >= 6) {
+            if (m_tile >= 5) {
                 float32x4_t f0 = vcvtq_f32_s32(c20);
                 float32x4_t f1 = vcvtq_f32_s32(c21);
                 float32x4_t f2 = vcvtq_f32_s32(c22);
@@ -421,14 +434,10 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
                 float* Cr0 = C + (i + 4) * ldc + j;
                 float* Cr1 = C + (i + 5) * ldc + j;
 
-                if (beta == 0.0f) {
-                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
-                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
-                } else {
-                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
-                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
-                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
-                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                // Store row 4 always if m_tile >= 5, row 5 only if m_tile >= 6
+                store_edge_tile_row(Cr0, n_tile, row0_lo, row0_hi);
+                if (m_tile >= 6) {
+                    store_edge_tile_row(Cr1, n_tile, row1_lo, row1_hi);
                 }
             }
 
@@ -450,14 +459,14 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
                 float* Cr0 = C + (i + 6) * ldc + j;
                 float* Cr1 = C + (i + 7) * ldc + j;
 
-                if (beta == 0.0f) {
-                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
-                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
+                if (n_tile == 8) {
+                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), vdupq_n_f32(1.0f), row0_lo));
+                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), vdupq_n_f32(1.0f), row0_hi));
+                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), vdupq_n_f32(1.0f), row1_lo));
+                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), vdupq_n_f32(1.0f), row1_hi));
                 } else {
-                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
-                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
-                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
-                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                    store_edge_tile_row(Cr0, n_tile, row0_lo, row0_hi);
+                    store_edge_tile_row(Cr1, n_tile, row1_lo, row1_hi);
                 }
             }
         }
