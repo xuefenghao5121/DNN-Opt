@@ -41,14 +41,15 @@ static inline float compute_scale_from_max(float max_abs) {
 
 /// Quantize FP32 vector to INT8 with given scale.
 /// Clamps to [-128, 127] range.
+/// NOTE: count must be >= 4, otherwise use scalar quantization.
 static inline int8x16_t quantize_fp32_to_int8(const float* ptr, float scale, int count) {
     float inv_scale = 1.0f / scale;
 
-    // Load and quantize
-    float32x4_t f0 = vld1q_f32(ptr);
-    float32x4_t f1 = (count > 4) ? vld1q_f32(ptr + 4) : vdupq_n_f32(0);
-    float32x4_t f2 = (count > 8) ? vld1q_f32(ptr + 8) : vdupq_n_f32(0);
-    float32x4_t f3 = (count > 12) ? vld1q_f32(ptr + 12) : vdupq_n_f32(0);
+    // Load and quantize - only load valid elements
+    float32x4_t f0 = (count >= 4) ? vld1q_f32(ptr) : vdupq_n_f32(0);
+    float32x4_t f1 = (count >= 8) ? vld1q_f32(ptr + 4) : vdupq_n_f32(0);
+    float32x4_t f2 = (count >= 12) ? vld1q_f32(ptr + 8) : vdupq_n_f32(0);
+    float32x4_t f3 = (count >= 16) ? vld1q_f32(ptr + 12) : vdupq_n_f32(0);
 
     // Scale and convert to int32
     int32x4_t i0 = vcvtq_s32_f32(vmulq_n_f32(f0, inv_scale));
@@ -106,74 +107,46 @@ void gemm_mx1_int8(int K, int N,
                     const float* B, int ldb,
                     float beta, float* C, int ldc) {
 #if defined(__ARM_FEATURE_MATMUL_INT8)
-    // Compute quantization scale for A
-    float scale_A = compute_scale_from_max(compute_max_abs(A, K));
-    float inv_scale_A = 1.0f / scale_A;
-
-    // Quantize A row to INT8 (K elements, pad to multiple of 8)
-    int k_padded = ((K + 7) / 8) * 8;
-    std::vector<int8_t> a_i8(k_padded, 0);
-
+    // Compute global quantization scales
+    float max_A = 0.0f, max_B = 0.0f;
     for (int k = 0; k < K; ++k) {
-        int32_t q = (int32_t)lrintf(A[k] * inv_scale_A);
+        float av = std::fabs(A[k]);
+        if (av > max_A) max_A = av;
+    }
+    for (int k = 0; k < K; ++k) {
+        for (int j = 0; j < N; ++j) {
+            float bv = std::fabs(B[k * ldb + j]);
+            if (bv > max_B) max_B = bv;
+        }
+    }
+
+    float scale_A = (max_A == 0.0f) ? 1.0f : max_A / 127.0f;
+    float scale_B = (max_B == 0.0f) ? 1.0f : max_B / 127.0f;
+    float dequant_scale = scale_A * scale_B;
+
+    // Quantize A row to INT8
+    std::vector<int8_t> a_i8(K, 0);
+    for (int k = 0; k < K; ++k) {
+        int32_t q = (int32_t)lrintf(A[k] / scale_A);
         a_i8[k] = std::max(-128, std::min(127, q));
     }
 
-    // Process N columns in pairs (each SMMLA computes 2 outputs)
-    // SMMLA layout: row-pair × col-pair = 2×2 INT32 output
-    // For M=1, we need special handling...
+    // Quantize B to INT8 (column-major for GEMV)
+    std::vector<int8_t> b_i8(K * N, 0);
+    for (int k = 0; k < K; ++k) {
+        for (int j = 0; j < N; ++j) {
+            int32_t q = (int32_t)lrintf(B[k * ldb + j] / scale_B);
+            b_i8[k * N + j] = std::max(-128, std::min(127, q));
+        }
+    }
 
-    // For M=1 GEMV, SMMLA isn't ideal (it's optimized for M≥2).
-    // We use dot product instead: SDOT for single row.
-    // Or fallback to scalar if SMMLA overhead is too high.
-
-    // Simple approach: quantize B on-the-fly, use scalar accumulate
-    // This is still faster than FP32 GEMV due to 4x INT8 throughput
-
+    // Scalar accumulate (safe for small K)
     for (int j = 0; j < N; ++j) {
-        // Compute scale for this column of B
-        float scale_B = compute_scale_from_max(compute_max_abs(B + j, K, ldb));
-
         int32_t sum = 0;
-        const int8_t* a_ptr = a_i8.data();
-        const float* b_col = B + j;
-
-        int k8 = K / 8;
-        for (int ki = 0; ki < k8; ++ki) {
-            // Load 8 INT8 A values
-            int8x16_t a_vec = vld1q_s8(a_ptr + ki * 8);
-            // Replicate as row-pair: [a0..a7, 0..0] for SMMLA
-            int8x16_t a_pair = vcombine_s8(vld1_s8(a_ptr + ki * 8), vdup_n_s8(0));
-
-            // Quantize B column slice
-            float b_vals[8];
-            for (int kk = 0; kk < 8; ++kk) {
-                b_vals[kk] = b_col[(ki * 8 + kk) * ldb];
-            }
-            float scale_B_slice = compute_scale_from_max(
-                std::max(fabsf(b_vals[0]), std::max(fabsf(b_vals[1]),
-                std::max(fabsf(b_vals[2]), std::max(fabsf(b_vals[3]),
-                std::max(fabsf(b_vals[4]), std::max(fabsf(b_vals[5]),
-                std::max(fabsf(b_vals[6]), fabsf(b_vals[7])))))))));
-
-            int8x16_t b_vec = quantize_fp32_to_int8(b_vals, scale_B_slice, 8);
-
-            // Use SDOT if available, or manual dot product
-            int32x4_t dot = vdotq_s32(vdupq_n_s32(0), a_pair, b_vec);
-            sum += vgetq_lane_s32(dot, 0) + vgetq_lane_s32(dot, 1) +
-                   vgetq_lane_s32(dot, 2) + vgetq_lane_s32(dot, 3);
+        for (int k = 0; k < K; ++k) {
+            sum += a_i8[k] * b_i8[k * N + j];
         }
-
-        // Tail K
-        for (int k = k8 * 8; k < K; ++k) {
-            float b_val = b_col[k * ldb];
-            int8_t b_q = (int8_t)lrintf(b_val / scale_B);
-            sum += a_i8[k] * b_q;
-        }
-
-        // Dequantize and store
-        float dequant = scale_A * scale_B;
-        float result = alpha * dequant * sum;
+        float result = alpha * dequant_scale * sum;
         if (beta == 0.0f) {
             C[j] = result;
         } else {
@@ -200,28 +173,60 @@ void gemm_mx1_int8(int K, int N,
 
 /// INT8 small-M kernel for M=2-8 using SMMLA.
 /// Requires ARMv8.6-A I8MM support.
+/// NOTE: Currently only handles N multiple of 8 (edge tiles need more work).
 void gemm_smallm_int8_smmla(int M, int N, int K,
                               float alpha, const float* A, int lda,
                               const float* B, int ldb,
                               float beta, float* C, int ldc) {
 #if defined(__ARM_FEATURE_MATMUL_INT8)
-    // Compute quantization scales
-    float scale_A = compute_scale_from_max(compute_max_abs(A, M * K, 1));
-    float scale_B = compute_scale_from_max(compute_max_abs(B, K * N, ldb));
+    // Edge tile handling is incomplete - fall back to FP32 for non-multiple of 8
+    if (N % 8 != 0) {
+        extern void gemm_smallm_driver_fp32(int M, int N, int K,
+                                             float alpha, const float* A, int lda,
+                                             const float* B, int ldb,
+                                             float beta, float* C, int ldc);
+        gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        return;
+    }
+
+    // Compute quantization scales: max(|A|) / 127, max(|B|) / 127
+    // A is M×K row-major: iterate M rows, each row has K elements
+    // B is K×N row-major: iterate K rows, each row has N elements
+    float max_A = 0.0f, max_B = 0.0f;
+    for (int i = 0; i < M; ++i) {
+        for (int k = 0; k < K; ++k) {
+            float av = std::fabs(A[i * lda + k]);
+            if (av > max_A) max_A = av;
+        }
+    }
+    for (int k = 0; k < K; ++k) {
+        for (int j = 0; j < N; ++j) {
+            float bv = std::fabs(B[k * ldb + j]);
+            if (bv > max_B) max_B = bv;
+        }
+    }
+
+    float scale_A = compute_scale_from_max(max_A);
+    float scale_B = compute_scale_from_max(max_B);
 
     float dequant_scale = scale_A * scale_B;
 
     // Pad K to multiple of 8 (SMMLA processes 8 INT8 per K-step)
     int k_padded = ((K + 7) / 8) * 8;
 
-    // Quantize A (M rows)
-    std::vector<int8_t> a_i8(M * k_padded, 0);
+    // Quantize A (M rows) - use fixed buffer
+    int a_buf_size = M * k_padded;
+    std::vector<int8_t> a_i8(a_buf_size, 0);
     for (int i = 0; i < M; ++i) {
         for (int k = 0; k < K; ++k) {
             int32_t q = (int32_t)lrintf(A[i * lda + k] / scale_A);
             a_i8[i * k_padded + k] = std::max(-128, std::min(127, q));
         }
     }
+
+    // Fixed B buffer (max 64 bytes per K-group)
+    int b_buf_size = k_padded / 8 * 64;  // One tile's worth
+    std::vector<int8_t> b_i8(b_buf_size, 0);
 
     // Initialize C with beta
     if (beta != 1.0f) {
@@ -247,7 +252,9 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
             // Each 16 bytes = [col0_k0..k7, col1_k0..k7] for one col-pair
             // 4 col-pairs per K-group = 64 bytes per K-group
             int tile_k8 = k_padded / 8;  // K-groups in this tile
-            std::vector<int8_t> b_tile(tile_k8 * 64, 0);
+            // Use pre-allocated buffer
+            int8_t* b_tile = b_i8.data();
+            std::fill(b_i8.begin(), b_i8.end(), 0);  // Clear buffer
 
             int b_idx = 0;
             for (int ki = 0; ki < tile_k8; ++ki) {
@@ -280,7 +287,7 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
 
             // K-loop
             const int8_t* a_tile_ptr = &a_i8[i * k_padded];  // Base pointer for this M tile
-            const int8_t* b_tile_ptr = b_tile.data();        // Base pointer for this B tile
+            const int8_t* b_tile_ptr = b_tile;               // Base pointer for this B tile
 
             for (int ki = 0; ki < tile_k8; ++ki) {
                 // Load A row-pairs (4 vectors for 8 rows)
@@ -337,37 +344,122 @@ void gemm_smallm_int8_smmla(int M, int N, int K,
             // Dequantize and store
             float scale = alpha * dequant_scale;
             float32x4_t scale_v = vdupq_n_f32(scale);
-            float32x4_t beta_v = vdupq_n_f32(beta);
 
-#define STORE_INT8_ROW_PAIR(row, a0, a1, a2, a3) do { \
-    float32x4_t f0 = vcvtq_f32_s32(a0); \
-    float32x4_t f1 = vcvtq_f32_s32(a1); \
-    float32x4_t f2 = vcvtq_f32_s32(a2); \
-    float32x4_t f3 = vcvtq_f32_s32(a3); \
-    float32x2_t lo0 = vget_low_f32(f0), lo1 = vget_low_f32(f1); \
-    float32x2_t lo2 = vget_low_f32(f2), lo3 = vget_low_f32(f3); \
-    float32x2_t hi0 = vget_high_f32(f0), hi1 = vget_high_f32(f1); \
-    float32x2_t hi2 = vget_high_f32(f2), hi3 = vget_high_f32(f3); \
-    float32x4_t row0_lo = vmulq_f32(scale_v, vcombine_f32(lo0, lo1)); \
-    float32x4_t row0_hi = vmulq_f32(scale_v, vcombine_f32(lo2, lo3)); \
-    float32x4_t row1_lo = vmulq_f32(scale_v, vcombine_f32(hi0, hi1)); \
-    float32x4_t row1_hi = vmulq_f32(scale_v, vcombine_f32(hi2, hi3)); \
-    float* Cr0 = C + (row) * ldc + j; \
-    float* Cr1 = C + ((row)+1) * ldc + j; \
-    if (beta == 0.0f) { \
-        vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0+4, row0_hi); \
-        vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1+4, row1_hi); \
-    } else { \
-        vst1q_f32(Cr0, vfmaq_f32(vmulq_f32(beta_v, vld1q_f32(Cr0)), scale_v, vcombine_f32(lo0, lo1))); \
-    } \
-} while(0)
+            // Store row-pair 0 (rows i+0, i+1)
+            if (m_tile >= 2) {
+                float32x4_t f0 = vcvtq_f32_s32(c00);
+                float32x4_t f1 = vcvtq_f32_s32(c01);
+                float32x4_t f2 = vcvtq_f32_s32(c02);
+                float32x4_t f3 = vcvtq_f32_s32(c03);
+                float32x2_t lo0 = vget_low_f32(f0), lo1 = vget_low_f32(f1);
+                float32x2_t lo2 = vget_low_f32(f2), lo3 = vget_low_f32(f3);
+                float32x2_t hi0 = vget_high_f32(f0), hi1 = vget_high_f32(f1);
+                float32x2_t hi2 = vget_high_f32(f2), hi3 = vget_high_f32(f3);
+                float32x4_t row0_lo = vmulq_f32(scale_v, vcombine_f32(lo0, lo1));
+                float32x4_t row0_hi = vmulq_f32(scale_v, vcombine_f32(lo2, lo3));
+                float32x4_t row1_lo = vmulq_f32(scale_v, vcombine_f32(hi0, hi1));
+                float32x4_t row1_hi = vmulq_f32(scale_v, vcombine_f32(hi2, hi3));
 
-            if (m_tile >= 2) STORE_INT8_ROW_PAIR(0, c00, c01, c02, c03);
-            if (m_tile >= 4) STORE_INT8_ROW_PAIR(2, c10, c11, c12, c13);
-            if (m_tile >= 6) STORE_INT8_ROW_PAIR(4, c20, c21, c22, c23);
-            if (m_tile >= 8) STORE_INT8_ROW_PAIR(6, c30, c31, c32, c33);
+                float* Cr0 = C + (i + 0) * ldc + j;
+                float* Cr1 = C + (i + 1) * ldc + j;
 
-#undef STORE_INT8_ROW_PAIR
+                if (beta == 0.0f) {
+                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
+                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
+                } else {
+                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
+                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
+                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
+                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                }
+            }
+
+            // Store row-pair 1 (rows i+2, i+3)
+            if (m_tile >= 4) {
+                float32x4_t f0 = vcvtq_f32_s32(c10);
+                float32x4_t f1 = vcvtq_f32_s32(c11);
+                float32x4_t f2 = vcvtq_f32_s32(c12);
+                float32x4_t f3 = vcvtq_f32_s32(c13);
+                float32x2_t lo0 = vget_low_f32(f0), lo1 = vget_low_f32(f1);
+                float32x2_t lo2 = vget_low_f32(f2), lo3 = vget_low_f32(f3);
+                float32x2_t hi0 = vget_high_f32(f0), hi1 = vget_high_f32(f1);
+                float32x2_t hi2 = vget_high_f32(f2), hi3 = vget_high_f32(f3);
+                float32x4_t row0_lo = vmulq_f32(scale_v, vcombine_f32(lo0, lo1));
+                float32x4_t row0_hi = vmulq_f32(scale_v, vcombine_f32(lo2, lo3));
+                float32x4_t row1_lo = vmulq_f32(scale_v, vcombine_f32(hi0, hi1));
+                float32x4_t row1_hi = vmulq_f32(scale_v, vcombine_f32(hi2, hi3));
+
+                float* Cr0 = C + (i + 2) * ldc + j;
+                float* Cr1 = C + (i + 3) * ldc + j;
+
+                if (beta == 0.0f) {
+                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
+                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
+                } else {
+                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
+                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
+                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
+                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                }
+            }
+
+            // Store row-pair 2 (rows i+4, i+5)
+            if (m_tile >= 6) {
+                float32x4_t f0 = vcvtq_f32_s32(c20);
+                float32x4_t f1 = vcvtq_f32_s32(c21);
+                float32x4_t f2 = vcvtq_f32_s32(c22);
+                float32x4_t f3 = vcvtq_f32_s32(c23);
+                float32x2_t lo0 = vget_low_f32(f0), lo1 = vget_low_f32(f1);
+                float32x2_t lo2 = vget_low_f32(f2), lo3 = vget_low_f32(f3);
+                float32x2_t hi0 = vget_high_f32(f0), hi1 = vget_high_f32(f1);
+                float32x2_t hi2 = vget_high_f32(f2), hi3 = vget_high_f32(f3);
+                float32x4_t row0_lo = vmulq_f32(scale_v, vcombine_f32(lo0, lo1));
+                float32x4_t row0_hi = vmulq_f32(scale_v, vcombine_f32(lo2, lo3));
+                float32x4_t row1_lo = vmulq_f32(scale_v, vcombine_f32(hi0, hi1));
+                float32x4_t row1_hi = vmulq_f32(scale_v, vcombine_f32(hi2, hi3));
+
+                float* Cr0 = C + (i + 4) * ldc + j;
+                float* Cr1 = C + (i + 5) * ldc + j;
+
+                if (beta == 0.0f) {
+                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
+                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
+                } else {
+                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
+                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
+                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
+                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                }
+            }
+
+            // Store row-pair 3 (rows i+6, i+7) - only if m_tile >= 7
+            if (m_tile >= 7) {
+                float32x4_t f0 = vcvtq_f32_s32(c30);
+                float32x4_t f1 = vcvtq_f32_s32(c31);
+                float32x4_t f2 = vcvtq_f32_s32(c32);
+                float32x4_t f3 = vcvtq_f32_s32(c33);
+                float32x2_t lo0 = vget_low_f32(f0), lo1 = vget_low_f32(f1);
+                float32x2_t lo2 = vget_low_f32(f2), lo3 = vget_low_f32(f3);
+                float32x2_t hi0 = vget_high_f32(f0), hi1 = vget_high_f32(f1);
+                float32x2_t hi2 = vget_high_f32(f2), hi3 = vget_high_f32(f3);
+                float32x4_t row0_lo = vmulq_f32(scale_v, vcombine_f32(lo0, lo1));
+                float32x4_t row0_hi = vmulq_f32(scale_v, vcombine_f32(lo2, lo3));
+                float32x4_t row1_lo = vmulq_f32(scale_v, vcombine_f32(hi0, hi1));
+                float32x4_t row1_hi = vmulq_f32(scale_v, vcombine_f32(hi2, hi3));
+
+                float* Cr0 = C + (i + 6) * ldc + j;
+                float* Cr1 = C + (i + 7) * ldc + j;
+
+                if (beta == 0.0f) {
+                    vst1q_f32(Cr0, row0_lo); vst1q_f32(Cr0 + 4, row0_hi);
+                    vst1q_f32(Cr1, row1_lo); vst1q_f32(Cr1 + 4, row1_hi);
+                } else {
+                    vst1q_f32(Cr0, vfmaq_f32(vld1q_f32(Cr0), scale_v, row0_lo));
+                    vst1q_f32(Cr0 + 4, vfmaq_f32(vld1q_f32(Cr0 + 4), scale_v, row0_hi));
+                    vst1q_f32(Cr1, vfmaq_f32(vld1q_f32(Cr1), scale_v, row1_lo));
+                    vst1q_f32(Cr1 + 4, vfmaq_f32(vld1q_f32(Cr1 + 4), scale_v, row1_hi));
+                }
+            }
         }
     }
 
