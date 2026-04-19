@@ -166,14 +166,14 @@ void conv2d_fp32(const Conv2DParams& p,
     // Winograd path: 3×3 conv with stride=1, padding=1
     // Reduces multiplications:
     //   - F(2x2, 3x3): 2.25x fewer (9 → 4)
-    // F(4x4, 3x3) is not yet implemented correctly, use F(2x2) for all cases
+    // F(4x4, 3x3) is disabled pending correct transform matrices
     if (p.KH == 3 && p.KW == 3 &&
         p.stride_h == 1 && p.stride_w == 1 &&
         p.pad_h == 1 && p.pad_w == 1) {
         const int OH = p.OH(), OW = p.OW();
 
         if (OH >= 8 && OW >= 8) {
-            // F(2x2, 3x3): 2.25x reduction in multiplications
+            // F(2x2, 3x3): 2.25x fewer multiplications
             conv2d_winograd_3x3_s1p1(p, input, filter, output);
         } else {
             // Small spatial dims: im2col is better (Winograd overhead not amortized)

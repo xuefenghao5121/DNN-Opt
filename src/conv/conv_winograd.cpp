@@ -366,10 +366,10 @@ void conv2d_winograd_3x3_s1p1(
 // ============================================================
 
 /// Filter transform for F(4x4, 3x3): G * g * G^T
-/// G is 6x3, produces 6x4 transformed filter.
+/// G is 6x3, produces 6x6 transformed filter.
 static inline void winograd_filter_transform_4x4_3x3(
     const float* filter,  // [3x3] row-major
-    float* GgGT) {        // [6x4] output (24 elements)
+    float* U) {           // [6x6] output (36 elements)
 
     float g00 = filter[0];
     float g01 = filter[1];
@@ -386,7 +386,7 @@ static inline void winograd_filter_transform_4x4_3x3(
     // G[1] = [ -1/6, -1/6, -1/6]
     // G[2] = [ -1/6,  1/6, -1/6]
     // G[3] = [ 1/24, 1/12,  1/6]
-    // G[4] = [ 1/24, -1/12, 1/6]
+    // G[4] = [ 1/24,-1/12,  1/6]
     // G[5] = [    0,    0,    1]
 
     // G * g (6x3)
@@ -410,53 +410,138 @@ static inline void winograd_filter_transform_4x4_3x3(
     Gg[5][1] = g21;
     Gg[5][2] = g22;
 
-    // G^T for F(4x4, 3x3): transpose of G, but we use simplified formulas
-    // (G * g) * G^T produces 6x4 matrix
-    // Using precomputed formulas for efficiency
+    // (G * g) * G^T (G^T is 3x6)
+    // G^T columns match G rows:
+    // Col 0: [1/4, -1/6, -1/6, 1/24, 1/24, 0]
+    // Col 1: [0, -1/6, 1/6, 1/12, -1/12, 0]
+    // Col 2: [0, -1/6, -1/6, 1/6, 1/6, 1]
 
-    // Row 0: Gg[0] * [1/4, -1/6, -1/6, 1/24, 1/24, 0]
-    GgGT[0] = Gg[0][0];
-    GgGT[1] = -1.0f/6.0f * Gg[0][0] + -1.0f/6.0f * Gg[1][0];
-    GgGT[2] = -1.0f/6.0f * Gg[0][0] + 1.0f/6.0f * Gg[2][0];
-    GgGT[3] = 1.0f/24.0f * Gg[0][0] + 1.0f/24.0f * Gg[4][0];
-
-    // Simplified: just store Gg values (input transform handles the rest)
-    // Actually for F(4x4, 3x3), the transform is more complex
-    // Let's use a simpler approach: store the 6x4 values directly
-
-    // Store transformed filter in packed format for efficiency
     for (int i = 0; i < 6; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            // Simplified: we'll compute the full transform in the main loop
-            GgGT[i * 4 + j] = Gg[i][j % 3];  // Placeholder, full transform needed
-        }
+        // U[i][0] = Gg[i][0] * 1/4 + Gg[i][1] * 0 + Gg[i][2] * 0 = Gg[i][0]/4
+        U[i*6 + 0] = Gg[i][0] * 0.25f;
+        // U[i][1] = Gg[i][0] * (-1/6) + Gg[i][1] * (-1/6) + Gg[i][2] * (-1/6)
+        U[i*6 + 1] = -1.0f/6.0f * (Gg[i][0] + Gg[i][1] + Gg[i][2]);
+        // U[i][2] = Gg[i][0] * (-1/6) + Gg[i][1] * (1/6) + Gg[i][2] * (-1/6)
+        U[i*6 + 2] = -1.0f/6.0f * (Gg[i][0] - Gg[i][1] + Gg[i][2]);
+        // U[i][3] = Gg[i][0] * (1/24) + Gg[i][1] * (1/12) + Gg[i][2] * (1/6)
+        U[i*6 + 3] = Gg[i][0]/24.0f + Gg[i][1]/12.0f + Gg[i][2]/6.0f;
+        // U[i][4] = Gg[i][0] * (1/24) + Gg[i][1] * (-1/12) + Gg[i][2] * (1/6)
+        U[i*6 + 4] = Gg[i][0]/24.0f - Gg[i][1]/12.0f + Gg[i][2]/6.0f;
+        // U[i][5] = Gg[i][0] * 0 + Gg[i][1] * 0 + Gg[i][2] * 1 = Gg[i][2]
+        U[i*6 + 5] = Gg[i][2];
     }
 }
 
-/// Output transform for F(4x4, 3x3): A^T * m * A (6x6 → 4x4)
+/// Input transform for 6x6 tile: B^T * d * B
+/// B^T is 6x6, produces 6x6 transformed input.
+static inline void winograd_input_transform_6x6(
+    const float* d_tile,  // [6x6] row-major
+    float* V) {           // [6x6] output (36 elements)
+
+    // B^T matrix for F(4x4, 3x3):
+    // B^T = [[  4,  0, -5,  0,  1, 0 ],
+    //        [  0, -4, -4,  1,  1, 0 ],
+    //        [  0,  6,  6, -1, -1, 0 ],
+    //        [  0, -6, 12, -1,  1, 0 ],
+    //        [  0,  4, -8,  1,  1, 0 ],
+    //        [  0,  0,  1,  0, -1, 1 ]]
+
+    // Load 6x6 input tile
+    float d[6][6];
+    for (int i = 0; i < 6; ++i) {
+        for (int j = 0; j < 6; ++j) {
+            d[i][j] = d_tile[i*6 + j];
+        }
+    }
+
+    // B^T * d (6x6 intermediate)
+    float Bd[6][6];
+    // Row 0 of B^T: [4, 0, -5, 0, 1, 0]
+    for (int j = 0; j < 6; ++j) {
+        Bd[0][j] = 4*d[0][j] - 5*d[2][j] + d[4][j];
+    }
+    // Row 1 of B^T: [0, -4, -4, 1, 1, 0]
+    for (int j = 0; j < 6; ++j) {
+        Bd[1][j] = -4*d[1][j] - 4*d[2][j] + d[3][j] + d[4][j];
+    }
+    // Row 2 of B^T: [0, 6, 6, -1, -1, 0]
+    for (int j = 0; j < 6; ++j) {
+        Bd[2][j] = 6*d[1][j] + 6*d[2][j] - d[3][j] - d[4][j];
+    }
+    // Row 3 of B^T: [0, -6, 12, -1, 1, 0]
+    for (int j = 0; j < 6; ++j) {
+        Bd[3][j] = -6*d[1][j] + 12*d[2][j] - d[3][j] + d[4][j];
+    }
+    // Row 4 of B^T: [0, 4, -8, 1, 1, 0]
+    for (int j = 0; j < 6; ++j) {
+        Bd[4][j] = 4*d[1][j] - 8*d[2][j] + d[3][j] + d[4][j];
+    }
+    // Row 5 of B^T: [0, 0, 1, 0, -1, 1]
+    for (int j = 0; j < 6; ++j) {
+        Bd[5][j] = d[2][j] - d[4][j] + d[5][j];
+    }
+
+    // (B^T * d) * B (6x6)
+    // B = transpose(B^T)
+    // V[i][j] = sum_k Bd[i][k] * B[k][j] = sum_k Bd[i][k] * B^T[j][k]
+    // B^T rows:
+    // Row 0: [  4,  0, -5,  0,  1, 0 ]
+    // Row 1: [  0, -4, -4,  1,  1, 0 ]
+    // Row 2: [  0,  6,  6, -1, -1, 0 ]
+    // Row 3: [  0, -6, 12, -1,  1, 0 ]
+    // Row 4: [  0,  4, -8,  1,  1, 0 ]
+    // Row 5: [  0,  0,  1,  0, -1, 1 ]
+
+    for (int i = 0; i < 6; ++i) {
+        // Column 0: B^T[0] = [4, 0, -5, 0, 1, 0]
+        V[i*6 + 0] = 4*Bd[i][0] - 5*Bd[i][2] + Bd[i][4];
+        // Column 1: B^T[1] = [0, -4, -4, 1, 1, 0]
+        V[i*6 + 1] = -4*Bd[i][1] - 4*Bd[i][2] + Bd[i][3] + Bd[i][4];
+        // Column 2: B^T[2] = [0, 6, 6, -1, -1, 0]
+        V[i*6 + 2] = 6*Bd[i][1] + 6*Bd[i][2] - Bd[i][3] - Bd[i][4];
+        // Column 3: B^T[3] = [0, -6, 12, -1, 1, 0]
+        V[i*6 + 3] = -6*Bd[i][1] + 12*Bd[i][2] - Bd[i][3] + Bd[i][4];
+        // Column 4: B^T[4] = [0, 4, -8, 1, 1, 0]
+        V[i*6 + 4] = 4*Bd[i][1] - 8*Bd[i][2] + Bd[i][3] + Bd[i][4];
+        // Column 5: B^T[5] = [0, 0, 1, 0, -1, 1]
+        V[i*6 + 5] = Bd[i][2] - Bd[i][4] + Bd[i][5];
+    }
+}
+
+/// Output transform for 6x6 → 4x4: A^T * M * A
 static inline void winograd_output_transform_4x4(
-    const float* M,  // [6x6] transformed output (simplified: 6x4)
+    const float* M,     // [6x6] transformed output
     float* out_tile) {  // [4x4] output (16 elements)
 
-    // A matrix for F(4x4, 3x3):
-    // A = [[1,  1,  1,  1,  1, 0],
-    //      [0,  1, -1,  2, -2, 0],
-    //      [0,  1,  1,  4,  4, 0],
-    //      [0,  1, -1,  8, -8, 1]]
+    // A^T matrix for F(4x4, 3x3):
+    // A^T = [[ 1,  1,  1,  1,  1, 0 ],
+    //        [ 0,  1, -1,  2, -2, 0 ],
+    //        [ 0,  1,  1,  4,  4, 0 ],
+    //        [ 0,  1, -1,  8, -8, 1 ]]
 
-    // A^T * m (4x6 intermediate)
-    // Then (A^T * m) * A → 4x4 output
+    // A^T * M (4x6 intermediate)
+    float AtM[4][6];
+    for (int j = 0; j < 6; ++j) {
+        AtM[0][j] = M[0*6 + j] + M[1*6 + j] + M[2*6 + j] + M[3*6 + j] + M[4*6 + j];
+        AtM[1][j] = M[1*6 + j] - M[2*6 + j] + 2*M[3*6 + j] - 2*M[4*6 + j];
+        AtM[2][j] = M[1*6 + j] + M[2*6 + j] + 4*M[3*6 + j] + 4*M[4*6 + j];
+        AtM[3][j] = M[1*6 + j] - M[2*6 + j] + 8*M[3*6 + j] - 8*M[4*6 + j] + M[5*6 + j];
+    }
 
-    // Simplified: compute 4x4 output directly
-    // Row 0: sum of M[0..5]
-    // Row 1: alternating sum
-    // Row 2: weighted sum
-    // Row 3: final row with M[5]
+    // (A^T * M) * A → 4x4 output
+    // A = transpose(A^T) (6x4):
+    // Col 0: [1, 0, 0, 0]
+    // Col 1: [1, 1, 1, 1]
+    // Col 2: [1, -1, 1, -1]
+    // Col 3: [1, 2, 4, 8]
+    // Col 4: [1, -2, 4, -8]
+    // Col 5: [0, 0, 0, 1]
 
     for (int i = 0; i < 4; ++i) {
-        for (int j = 0; j < 4; ++j) {
-            out_tile[i * 4 + j] = M[(i % 6) * 6 + (j % 6)];
-        }
+        out_tile[i*4 + 0] = AtM[i][0] + AtM[i][1] + AtM[i][2] + AtM[i][3] + AtM[i][4];
+        out_tile[i*4 + 1] = AtM[i][1] - AtM[i][2] + 2*AtM[i][3] - 2*AtM[i][4];
+        out_tile[i*4 + 2] = AtM[i][1] + AtM[i][2] + 4*AtM[i][3] + 4*AtM[i][4];
+        out_tile[i*4 + 3] = AtM[i][1] - AtM[i][2] + 8*AtM[i][3] - 8*AtM[i][4] + AtM[i][5];
     }
 }
 
@@ -478,10 +563,10 @@ void conv2d_winograd_4x4_3x3_s1p1(
     const int tile_H = (OH + 3) / 4;
     const int tile_W = (OW + 3) / 4;
 
-    // Allocate transformed filter buffer [OC, IC, 24]
-    auto transformed_filter = aligned_array<float>((size_t)OC * IC * 24);
+    // Allocate transformed filter buffer [OC, IC, 36] (6x6)
+    auto transformed_filter = aligned_array<float>((size_t)OC * IC * 36);
 
-    // Transform all filters (placeholder: actual transform needed)
+    // Transform all filters
     for (int oc = 0; oc < OC; ++oc) {
         for (int ic = 0; ic < IC; ++ic) {
             float g[9];
@@ -490,9 +575,8 @@ void conv2d_winograd_4x4_3x3_s1p1(
                     g[kh * 3 + kw] = filter[((oc * 3 + kh) * 3 + kw) * IC + ic];
                 }
             }
-            // Transform: F(4x4, 3x3) uses different formulas than F(2x2, 3x3)
             winograd_filter_transform_4x4_3x3(g,
-                &transformed_filter.get()[(oc * IC + ic) * 24]);
+                &transformed_filter.get()[(oc * IC + ic) * 36]);
         }
     }
 
@@ -512,8 +596,8 @@ void conv2d_winograd_4x4_3x3_s1p1(
 
                 // Accumulate over input channels
                 for (int ic = 0; ic < IC; ++ic) {
-                    // Extract 6x6 input tile
-                    float U_tile[36];
+                    // Extract 6x6 input tile from original input with bounds check
+                    float d_tile[36];
                     for (int i = 0; i < 6; ++i) {
                         for (int j = 0; j < 6; ++j) {
                             const int in_h = in_h_base + i;
@@ -522,20 +606,24 @@ void conv2d_winograd_4x4_3x3_s1p1(
                             if (in_h >= 0 && in_h < IH && in_w >= 0 && in_w < IW) {
                                 val = input[((n * IH + in_h) * IW + in_w) * IC + ic];
                             }
-                            U_tile[i * 6 + j] = val;
+                            d_tile[i * 6 + j] = val;
                         }
                     }
 
-                    // Accumulate
+                    // Input transform: V = B^T * d * B (6x6)
+                    float V_tile[36];
+                    winograd_input_transform_6x6(d_tile, V_tile);
+
+                    // Accumulate: M += U * V (element-wise multiply of 6x6)
                     for (int oc = 0; oc < OC; ++oc) {
-                        const float* GgGT = &transformed_filter.get()[(oc * IC + ic) * 24];
-                        for (int idx = 0; idx < 24; ++idx) {
-                            M_tile.get()[oc * 36 + idx] += U_tile[idx] * GgGT[idx];
+                        const float* U = &transformed_filter.get()[(oc * IC + ic) * 36];
+                        for (int idx = 0; idx < 36; ++idx) {
+                            M_tile.get()[oc * 36 + idx] += V_tile[idx] * U[idx];
                         }
                     }
                 }
 
-                // Output transform
+                // Output transform: Y = A^T * M * A for each OC
                 for (int oc = 0; oc < OC; ++oc) {
                     float out_tile[16];
                     winograd_output_transform_4x4(&M_tile.get()[oc * 36], out_tile);
