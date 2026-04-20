@@ -229,6 +229,9 @@ static const int kDefaultWarmupN[] = {4096, 1024, 512, 256, 128};
 static const int kDefaultWarmupK[] = {4096, 1024, 512, 256, 128};
 
 /// Micro-benchmark a specific GEMM kernel.
+/// NOTE: Must disable autotune during benchmark to avoid recursion!
+extern bool g_benchmark_mode;
+
 static double bench_gemm_kernel(GemmKernelId kernel_id, int M, int N, int K) {
     auto A = aligned_array<float>(M * K);
     auto B = aligned_array<float>(K * N);
@@ -240,6 +243,9 @@ static double bench_gemm_kernel(GemmKernelId kernel_id, int M, int N, int K) {
     std::memset(C.get(), 0, M * N * sizeof(float));
 
     Timer timer;
+
+    // Temporarily disable autotune to avoid recursion during benchmark
+    g_benchmark_mode = true;
 
     // Warmup
     gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
@@ -253,6 +259,9 @@ static double bench_gemm_kernel(GemmKernelId kernel_id, int M, int N, int K) {
         timer.stop();
         times[t] = timer.elapsed_us();
     }
+
+    // Restore autotune setting
+    g_benchmark_mode = false;
 
     // Median
     if (times[0] > times[1]) std::swap(times[0], times[1]);

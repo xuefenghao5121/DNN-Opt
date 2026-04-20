@@ -19,6 +19,13 @@ void gemm_driver_fp32(int M, int N, int K,
                       float alpha, const float* A, int lda,
                       const float* B, int ldb,
                       float beta, float* C, int ldc);
+
+/// Global flag to temporarily disable autotune during internal benchmarks.
+/// Used by bench_gemm_kernel() to avoid recursion.
+/// This is thread-safe because benchmarks run sequentially.
+bool g_benchmark_mode = false;
+
+// Forward declarations
 void gemm_smallm_driver_fp32(int M, int N, int K,
                               float alpha, const float* A, int lda,
                               const float* B, int ldb,
@@ -65,7 +72,11 @@ namespace {
 
 /// Check if autotune mode is enabled.
 /// Controlled by environment variable DNNOPT_AUTOTUNE=1.
+/// Can be temporarily disabled via g_benchmark_mode for internal micro-benchmarks.
 static bool is_autotune_enabled() {
+    // Check benchmark override first
+    if (g_benchmark_mode) return false;
+
     static bool enabled = []() {
         const char* env = std::getenv("DNNOPT_AUTOTUNE");
         return env != nullptr && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
@@ -100,28 +111,15 @@ bool dispatch_via_registry(GemmDataType dtype,
     const auto& hw = detect_arm_hwcaps();
     const auto& profile = get_autotuned_profile();
 
-    // v2 Autotune: Tile size selection (if enabled)
-    // Prefer autotuned Mr/Nr over priority-based selection
-    TileSelection tile_sel;
-    bool use_tile_autotune = is_autotune_enabled();
-    if (use_tile_autotune) {
-        tile_sel = select_tile_params(M, N, K);
-    }
+    // v2 Autotune: Tile size selection is handled by kernel selection
+    // Each kernel has its own optimal Mr/Nr, so we don't filter by tile separately
+    // Tile autotune is useful for benchmarking but not for dispatch filtering
 
     // Try all matching kernels in priority order until one fits M.
     auto candidates = GemmUkernelRegistry::instance().select_all(dtype, hw);
     for (const auto* desc : candidates) {
         int Nr = desc->nr_is_vla ? desc->compute_nr(hw.sve_vector_bits) : desc->Nr;
         int Mr = desc->Mr;
-
-        // Tile autotune: prefer kernel matching autotuned Mr/Nr
-        if (use_tile_autotune && tile_sel.valid) {
-            if (Mr != tile_sel.Mr || Nr != tile_sel.Nr) {
-                // Skip if this kernel doesn't match autotuned tile
-                // But still try it if no matching kernel found
-                continue;
-            }
-        }
 
         // Skip if M < Mr unless M-padding is explicitly allowed.
         // M-padding is wasteful for very small M but reasonable when M is close to Mr
@@ -156,42 +154,6 @@ bool dispatch_via_registry(GemmDataType dtype,
 
         gemm_driver_generic(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, cfg);
         return true;
-    }
-
-    // Fallback: if tile autotune selected a tile but no matching kernel,
-    // retry without tile filter (use priority-based selection)
-    if (use_tile_autotune && tile_sel.valid) {
-        for (const auto* desc : candidates) {
-            int Nr = desc->nr_is_vla ? desc->compute_nr(hw.sve_vector_bits) : desc->Nr;
-            int Mr = desc->Mr;
-
-            if (M < Mr && !allow_m_pad) continue;
-            if (M < Mr && M * 2 < Mr) continue;
-
-            auto bp = get_autotuned_blocking_params(M, N, K, Mr, Nr, desc->Kgroup,
-                                                     desc->packed_a_elem_bytes,
-                                                     desc->packed_b_elem_bytes);
-
-            GemmDriverConfig cfg;
-            cfg.Mr = Mr;
-            cfg.Nr = Nr;
-            cfg.Kgroup = desc->Kgroup;
-            cfg.Mc = bp.Mc;
-            cfg.Nc = bp.Nc;
-            cfg.Kc = bp.Kc;
-            cfg.packed_a_elem_bytes = desc->packed_a_elem_bytes;
-            cfg.packed_b_elem_bytes = desc->packed_b_elem_bytes;
-            cfg.dtype = dtype;
-            cfg.ukernel = desc->ukernel;
-            cfg.pack_a = desc->pack_a;
-            cfg.pack_b = desc->pack_b;
-            cfg.threading_min_flops = profile.threading_min_flops;
-            cfg.prefer_2d_threading = profile.prefer_2d_threading;
-            cfg.shape = classify_shape(M, N, K);
-
-            gemm_driver_generic(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, cfg);
-            return true;
-        }
     }
 
     return false;
