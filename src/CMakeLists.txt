@@ -53,6 +53,15 @@ add_library(dnnopt_core STATIC
     conv/conv_winograd3d.cpp
 )
 
+# SME ukernel files (conditionally compiled)
+if(DNNOPT_ENABLE_SME)
+    target_sources(dnnopt_core PRIVATE
+        gemm/gemm_ukernel_fp32_sme.cpp
+        gemm/gemm_ukernel_bf16_sme.cpp
+        gemm/gemm_ukernel_int8_sme.cpp
+    )
+endif()
+
 target_include_directories(dnnopt_core PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_SOURCE_DIR}/include

@@ -28,6 +28,7 @@ option(DNNOPT_BUILD_TESTS "Build regression tests" ON)
 option(DNNOPT_USE_OPENMP "Enable OpenMP" ON)
 option(DNNOPT_NATIVE_ARCH "Use -march=native" ON)
 option(DNNOPT_BUILD_BLAS "Build BLAS-compatible shared library (libdnnopt_blas.so)" ON)
+option(DNNOPT_ENABLE_SME "Enable SME kernels (requires SME-capable hardware)" OFF)
 
 # ============================================================
 # Compiler flags
@@ -48,6 +49,21 @@ if(DNNOPT_AARCH64)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ARCH_FLAGS}")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ARCH_FLAGS}")
     set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} ${ARCH_FLAGS}")
+endif()
+
+# ============================================================
+# SME Support
+# ============================================================
+if(DNNOPT_ENABLE_SME)
+    message(STATUS "SME support: ENABLED")
+    # SME requires ARMv9-A architecture
+    set(SME_FLAGS "-march=armv9-a+sme+sme-i16i64+sme-f64f64")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SME_FLAGS}")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SME_FLAGS}")
+    set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} ${SME_FLAGS}")
+    add_definitions(-DDNNOPT_HAS_SME)
+else()
+    message(STATUS "SME support: DISABLED (use -DDNNOPT_ENABLE_SME=ON to enable)")
 endif()
 
 # Release flags
