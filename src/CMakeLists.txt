@@ -29,7 +29,6 @@ add_library(dnnopt_core STATIC
     gemm/generated/neon_fp32_2x16.cpp
     gemm/gemm_driver_unpacked_fp32.cpp
     gemm/gemm_tiny_fp32.cpp
-    gemm/gemm_sme.cpp
     gemm/gemm_pack_bf16.cpp
     gemm/gemm_ukernel_bf16_neon.cpp
     gemm/gemm_driver_bf16.cpp

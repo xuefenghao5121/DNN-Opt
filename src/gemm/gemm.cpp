@@ -100,11 +100,28 @@ bool dispatch_via_registry(GemmDataType dtype,
     const auto& hw = detect_arm_hwcaps();
     const auto& profile = get_autotuned_profile();
 
+    // v2 Autotune: Tile size selection (if enabled)
+    // Prefer autotuned Mr/Nr over priority-based selection
+    TileSelection tile_sel;
+    bool use_tile_autotune = is_autotune_enabled();
+    if (use_tile_autotune) {
+        tile_sel = select_tile_params(M, N, K);
+    }
+
     // Try all matching kernels in priority order until one fits M.
     auto candidates = GemmUkernelRegistry::instance().select_all(dtype, hw);
     for (const auto* desc : candidates) {
         int Nr = desc->nr_is_vla ? desc->compute_nr(hw.sve_vector_bits) : desc->Nr;
         int Mr = desc->Mr;
+
+        // Tile autotune: prefer kernel matching autotuned Mr/Nr
+        if (use_tile_autotune && tile_sel.valid) {
+            if (Mr != tile_sel.Mr || Nr != tile_sel.Nr) {
+                // Skip if this kernel doesn't match autotuned tile
+                // But still try it if no matching kernel found
+                continue;
+            }
+        }
 
         // Skip if M < Mr unless M-padding is explicitly allowed.
         // M-padding is wasteful for very small M but reasonable when M is close to Mr
@@ -140,6 +157,43 @@ bool dispatch_via_registry(GemmDataType dtype,
         gemm_driver_generic(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, cfg);
         return true;
     }
+
+    // Fallback: if tile autotune selected a tile but no matching kernel,
+    // retry without tile filter (use priority-based selection)
+    if (use_tile_autotune && tile_sel.valid) {
+        for (const auto* desc : candidates) {
+            int Nr = desc->nr_is_vla ? desc->compute_nr(hw.sve_vector_bits) : desc->Nr;
+            int Mr = desc->Mr;
+
+            if (M < Mr && !allow_m_pad) continue;
+            if (M < Mr && M * 2 < Mr) continue;
+
+            auto bp = get_autotuned_blocking_params(M, N, K, Mr, Nr, desc->Kgroup,
+                                                     desc->packed_a_elem_bytes,
+                                                     desc->packed_b_elem_bytes);
+
+            GemmDriverConfig cfg;
+            cfg.Mr = Mr;
+            cfg.Nr = Nr;
+            cfg.Kgroup = desc->Kgroup;
+            cfg.Mc = bp.Mc;
+            cfg.Nc = bp.Nc;
+            cfg.Kc = bp.Kc;
+            cfg.packed_a_elem_bytes = desc->packed_a_elem_bytes;
+            cfg.packed_b_elem_bytes = desc->packed_b_elem_bytes;
+            cfg.dtype = dtype;
+            cfg.ukernel = desc->ukernel;
+            cfg.pack_a = desc->pack_a;
+            cfg.pack_b = desc->pack_b;
+            cfg.threading_min_flops = profile.threading_min_flops;
+            cfg.prefer_2d_threading = profile.prefer_2d_threading;
+            cfg.shape = classify_shape(M, N, K);
+
+            gemm_driver_generic(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc, cfg);
+            return true;
+        }
+    }
+
     return false;
 }
 
@@ -203,6 +257,14 @@ void gemm_fp32(int M, int N, int K,
                 // Fallback to adaptive tile if registry failed
                 gemm_adaptive_tile_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
                 return;
+            case GemmKernelId::kSME:
+                // SME kernel uses registry dispatch (priority 300 auto-selected on SME hardware)
+                if (dispatch_via_registry(GemmDataType::kFP32, M, N, K,
+                                          alpha, A, lda, B, ldb, beta, C, ldc))
+                    return;
+                // Fallback if SME not available
+                gemm_adaptive_tile_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+                return;
             }
 #endif
         }
@@ -213,7 +275,20 @@ void gemm_fp32(int M, int N, int K,
         // Phase 13: When N*K is very large, prefer packed path with threading instead
         // of small-M path — packing overhead is amortized and threading is beneficial.
         // Phase 14: SVE kernel for small-M (predicate-based edge handling for irregular N).
-        if (M < 8) {
+
+        // v2 Autotune: Use autotuned thresholds if enabled
+        ThresholdSelection thresh;
+        if (is_autotune_enabled()) {
+            thresh = get_current_thresholds();
+        } else {
+            // Default thresholds
+            thresh.small_m_bound = 8;
+            thresh.wide_n_bound = 48;
+            thresh.unpacked_thresh = 4 * 1024 * 1024;
+            thresh.valid = true;
+        }
+
+        if (M < thresh.small_m_bound) {
 #ifdef __ARM_FEATURE_SVE
             // SVE kernel: use predicate for N edge handling (irregular N, prime N)
             // This is cleaner than NEON scalar tail handling.
@@ -251,10 +326,10 @@ void gemm_fp32(int M, int N, int K,
             if ((M == 5 || M == 7) && (int64_t)N * K > kLargeNKThreshold) {
                 // Fall through to adaptive tile path below
             } else
-            // M=2-7: use wide driver for N >= 48 (macro-tiling benefit).
+            // M=2-7: use wide driver for N >= thresh.wide_n_bound (macro-tiling benefit).
             // M=2-3: always use wide driver (was original routing).
-            // M=4-7: only for N >= 48 where 48-col panels amortize B loads.
-            if (M >= 2 && (M < 4 || N >= 48)) {
+            // M=4-7: only for N >= thresh.wide_n_bound where 48-col panels amortize B loads.
+            if (M >= 2 && (M < 4 || N >= thresh.wide_n_bound)) {
                 gemm_smallm_wide_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
                 return;
             }
@@ -272,8 +347,8 @@ void gemm_fp32(int M, int N, int K,
         // Use for: (a) small vol shapes (packing overhead > compute), OR
         // (b) M=4-7 — asm kernels outperform packed 8x12 which zero-pads M to 8.
         if (M >= 4 && (
-            (int64_t)M * N * K < kUnpackedFlopsThreshold ||
-            M < 8
+            (int64_t)M * N * K < thresh.unpacked_thresh ||
+            M < thresh.small_m_bound
         )) {
             gemm_adaptive_tile_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
             return;
