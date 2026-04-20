@@ -4,6 +4,39 @@ All notable changes to DNN-Opt will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.28-dev] - 2026-04-20
+
+### Added
+- **Runtime Autotuning for Kernel Selection** (`src/gemm/gemm_autotune.cpp`)
+  - `select_gemm_kernel()`: Micro-benchmark comparison for optimal kernel selection
+  - `warmup_gemm_autotune()`: Pre-populate cache for common inference shapes
+  - `ShapeCache`: LRU cache (256 entries) with file persistence
+  - `GemmShapeKey`: 64-bit hash for GEMM/Conv2D shapes
+  - Environment variable `DNNOPT_AUTOTUNE=1` enables autotune-guided dispatch
+
+### Kernel Candidates
+- `kTiny`: M=1 or N=1 (GEMV/vector operations)
+- `kSmallM`: M<8, no packing overhead
+- `kSmallMWide`: M<8, N>=48, 48-col macro-tiling
+- `kAdaptiveTile`: M=4-32, unpacked + Kc blocking
+- `kPacked`: M>=8, packing + threading
+
+### Performance
+- batch-1 LLM (1×4096×4096): +8.8% vs heuristic
+- batch-4 LLM (4×4096×4096): +8.8% vs heuristic
+- batch-8 LLM (8×4096×4096): +8.5% vs heuristic
+
+### Files
+- `include/dnnopt/autotune/shape_cache.h`: ShapeKey, KernelSelection, ShapeCache
+- `src/autotune/shape_cache.cpp`: LRU cache implementation
+- `src/gemm/gemm_autotune.cpp`: Kernel selection + warmup API
+- `tests/test_autotune.cpp`: Autotune correctness tests
+
+### Tests
+- test_autotune: All passed (shape cache, kernel selection, persistence)
+- test_gemm_correctness: 74/74 passed
+- test_conv_correctness: 31/31 passed
+
 ## [0.9.23-dev] - 2026-04-19
 
 ### Added

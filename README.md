@@ -1,6 +1,6 @@
 # DNN-Opt: oneDNN Supplementary Patch for ARM Inference
 
-**Version 0.9.17-dev** | ARM GEMM optimization library, designed as a supplementary patch for oneDNN.
+**Version 0.9.28-dev** | ARM GEMM optimization library, designed as a supplementary patch for oneDNN.
 
 Dnnopt accelerates the matrix shapes where oneDNN underperforms -- small M, irregular N, tall-skinny dimensions -- while falling back to oneDNN for shapes where oneDNN is already near-peak. No code changes required in your inference framework.
 
@@ -43,6 +43,23 @@ The sole loss is M=6 N=4096 K=4096 (0.74x), where oneDNN uses a dual-threaded pa
 | BERT-small batch=4 | 27215 us | 2365 us | **11.5x** |
 | LLM inference batch=1 | 260927 us | 44016 us | **5.9x** |
 | LLM inference batch=4 | 531784 us | 148018 us | **3.6x** |
+
+### Full E2E Comparison: oneDNN → dnnopt → autotune (Neoverse N2)
+
+| Shape | oneDNN GF | dnnopt GF | autotune GF | dnnopt↑ |
+|-------|-----------|-----------|-------------|---------|
+| [1,256,1024] (batch-1) | 0.50 | 8.79 | 8.95 | **17.6x** |
+| [4,256,1024] (batch-4) | 1.86 | 25.33 | 25.26 | **13.6x** |
+| [1,1024,1024] | 1.18 | 7.82 | 7.83 | **6.6x** |
+| [4,1024,1024] | 1.39 | 22.67 | 22.63 | **16.3x** |
+| [8,512,512] | 3.92 | 31.28 | 31.64 | **8.0x** |
+| [32,512,512] | 12.07 | 40.15 | 39.80 | **3.3x** |
+| **Small-batch avg (M≤4)** | 1.23 | 16.15 | 16.17 | **13.1x** |
+| **Overall avg** | 11.97 | 25.62 | 25.61 | **2.1x** |
+
+**Key findings:**
+- **dnnopt 补充 oneDNN 弱点**: Small-batch (M≤4) 提升 **13.1x**
+- **autotune 加强 dnnopt**: Heuristic dispatch 已针对弱点优化，autotune 提供微调 (+0.1%)
 
 ### FP32 Peak Performance (Large Regular Shapes)
 
@@ -357,6 +374,74 @@ cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
 ```
 
 Full BLAS compatibility: `cblas_sgemm`, `cblas_saxpy`, plus OpenBLAS-compatible thread control (`openblas_set_num_threads`, etc.).
+
+### Runtime Autotuning
+
+DNN-Opt v0.9.28 introduces runtime autotuning for kernel selection on unknown ARM CPUs. This addresses oneDNN's weakness in small-batch inference shapes (M=1, 4, 8) where kernel selection significantly impacts performance.
+
+**Enable autotuning:**
+```bash
+export DNNOPT_AUTOTUNE=1  # Enable autotune-guided dispatch
+./your_inference_app
+```
+
+**API:**
+```cpp
+#include <dnnopt/gemm/gemm_autotune.h>
+
+// Warmup cache for common inference shapes (batch-1,4,8 LLM)
+dnnopt::warmup_gemm_autotune();
+
+// Or specify custom shapes
+int M[] = {1, 4, 8, 16};
+int N[] = {4096, 4096, 4096, 512};
+int K[] = {4096, 4096, 4096, 512};
+dnnopt::warmup_gemm_autotune(M, N, K, 4);
+
+// Persist cache to file (avoid re-benchmarking on restart)
+dnnopt::save_gemm_kernel_cache("/path/to/cache.bin");
+
+// Load cache on startup
+dnnopt::load_gemm_kernel_cache("/path/to/cache.bin");
+```
+
+**Kernel candidates:**
+
+| Kernel | Description | Best for |
+|--------|-------------|----------|
+| `kTiny` | M=1 or N=1 | GEMV/vector operations |
+| `kSmallM` | M<8 | Small batch, no packing overhead |
+| `kSmallMWide` | M<8, N>=48 | 48-col macro-tiling for large N*K |
+| `kAdaptiveTile` | M=4-32 | Unpacked + Kc blocking |
+| `kPacked` | M>=8 | Packing + threading for large shapes |
+
+**Performance impact (Neoverse N2):**
+
+| Shape | HEURISTIC GF | AUTOTUNE GF | Δ |
+|-------|-------------|-------------|---|
+| 1×4096×4096 (batch-1 LLM) | 5.7 | 6.2 | **+8.8%** |
+| 4×4096×4096 (batch-4 LLM) | 8.0 | 8.7 | **+8.8%** |
+| 8×4096×4096 | 17.6 | 19.1 | +8.5% |
+
+**How it works:**
+
+1. First call for unknown shape triggers micro-benchmark (3 iterations)
+2. Compares candidate kernels and caches optimal choice
+3. Subsequent calls use cached selection (zero latency)
+4. LRU cache (256 entries) + file persistence
+
+**Recommended usage:**
+
+```cpp
+// Application startup
+dnnopt::load_gemm_kernel_cache("/var/cache/dnnopt/autotune.bin");
+dnnopt::warmup_gemm_autotune();  // Warmup common shapes if cache empty
+
+// ... inference code runs with optimal kernel selection ...
+
+// Application shutdown (optional, persist new discoveries)
+dnnopt::save_gemm_kernel_cache("/var/cache/dnnopt/autotune.bin");
+```
 
 ### Thread Control
 

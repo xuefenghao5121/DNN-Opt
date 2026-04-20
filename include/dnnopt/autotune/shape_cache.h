@@ -80,6 +80,61 @@ struct KernelSelection {
 };
 
 // ============================================================
+// Blocking Parameter Selection (v2 Autotune)
+// ============================================================
+
+/// Blocking parameter candidates for autotune.
+/// Instead of searching 5×5×5 = 125 configs, we define key presets.
+enum class BlockingPreset : uint8_t {
+    kConservative = 0,  // l1d=0.30, l2=0.30, l3=0.20 - Safe for all CPUs
+    kStandard     = 1,  // l1d=0.35, l2=0.35, l3=0.25 - oneDNN-style
+    kModerate     = 2,  // l1d=0.40, l2=0.40, l3=0.30 - Balanced
+    kAggressive   = 3,  // l1d=0.45, l2=0.45, l3=0.35 - High bandwidth
+    kMaximum      = 4,  // l1d=0.50, l2=0.50, l3=0.40 - V-series/SVE
+};
+
+/// Blocking selection result with measured performance.
+struct BlockingSelection {
+    BlockingPreset preset;    // Selected blocking preset
+    float          gflops;    // Measured performance
+    uint32_t       time_us;   // Benchmark time
+    bool           valid;     // True if benchmark was run
+};
+
+/// Get blocking parameters from preset.
+/// Returns (l1d_util, l2_util, l3_util) tuple.
+struct BlockingParams {
+    float l1d_util;
+    float l2_util;
+    float l3_util;
+};
+BlockingParams get_blocking_params_from_preset(BlockingPreset preset);
+
+// ============================================================
+// Tile Size Selection (v2 Autotune)
+// ============================================================
+
+/// Tile size candidates for packed kernels.
+enum class TilePreset : uint8_t {
+    k4x16  = 0,   // Mr=4, Nr=16 (asm kernel)
+    k6x16  = 1,   // Mr=6, Nr=16 (asm kernel)
+    k8x12  = 2,   // Mr=8, Nr=12 (NEON standard)
+    k8x16  = 3,   // Mr=8, Nr=16 (packed wide)
+};
+
+/// Tile selection result.
+struct TileSelection {
+    TilePreset preset;      // Selected tile preset
+    uint8_t    Mr;          // Row tile size
+    uint8_t    Nr;          // Column tile size
+    float      gflops;      // Measured performance
+    bool       valid;       // True if benchmark was run
+};
+
+/// Get (Mr, Nr) from tile preset.
+void get_tile_params_from_preset(TilePreset preset, int& Mr, int& Nr);
+
+// ============================================================
 // Shape Cache (LRU, 256 entries)
 // ============================================================
 
@@ -120,8 +175,72 @@ private:
     void evict_oldest();
 };
 
+/// LRU cache for blocking parameter selection (v2 autotune).
+class BlockingCache {
+public:
+    static constexpr int kMaxEntries = 128;  // Fewer entries (blocking less shape-sensitive)
+
+    BlockingCache();
+
+    const BlockingSelection* lookup(uint64_t key) const;
+    void insert(uint64_t key, const BlockingSelection& sel);
+    void clear();
+    size_t size() const;
+
+private:
+    std::unordered_map<uint64_t, BlockingSelection> cache_;
+    std::list<uint64_t> lru_order_;
+    void evict_oldest();
+};
+
+/// LRU cache for tile size selection (v2 autotune).
+class TileCache {
+public:
+    static constexpr int kMaxEntries = 64;   // Tile selection for packed path only
+
+    TileCache();
+
+    const TileSelection* lookup(uint64_t key) const;
+    void insert(uint64_t key, const TileSelection& sel);
+    void clear();
+    size_t size() const;
+
+private:
+    std::unordered_map<uint64_t, TileSelection> cache_;
+    std::list<uint64_t> lru_order_;
+    void evict_oldest();
+};
+
 // ============================================================
-// Global Cache Instance
+// Threshold Selection (v2 Autotune)
+// ============================================================
+
+/// Dispatch threshold candidates.
+/// These control kernel path selection boundaries.
+struct ThresholdSelection {
+    uint8_t  small_m_bound;    // M < bound → small-M path (default: 8)
+    uint16_t wide_n_bound;     // N >= bound → smallm_wide (default: 48)
+    uint32_t unpacked_thresh;  // M*N*K < thresh → adaptive_tile (default: 4M)
+    float    benchmark_gflops;
+    bool     valid;
+};
+
+/// Threshold configuration cache (v2 autotune).
+/// Note: Thresholds are CPU-wide, not shape-specific, so single entry.
+class ThresholdCache {
+public:
+    ThresholdCache();
+
+    const ThresholdSelection* get() const;
+    void set(const ThresholdSelection& sel);
+    void clear();
+    bool valid() const;
+
+private:
+    ThresholdSelection sel_;
+    bool valid_;
+};
+
 // ============================================================
 
 /// Global GEMM shape cache singleton.
@@ -129,6 +248,15 @@ ShapeCache& get_gemm_shape_cache();
 
 /// Global Conv2D shape cache singleton.
 ShapeCache& get_conv_shape_cache();
+
+/// Global blocking parameter cache singleton (v2 autotune).
+BlockingCache& get_blocking_cache();
+
+/// Global tile size cache singleton (v2 autotune).
+TileCache& get_tile_cache();
+
+/// Global threshold cache singleton (v2 autotune).
+ThresholdCache& get_threshold_cache();
 
 /// Clear all caches.
 void clear_all_shape_caches();

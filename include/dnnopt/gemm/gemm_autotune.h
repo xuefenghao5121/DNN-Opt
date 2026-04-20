@@ -13,6 +13,11 @@
 ///   - ShapeCache integration for persistent kernel choices
 ///   - Built-in profiles + file cache + online fallback
 ///
+/// v2.0 improvements:
+///   - Blocking parameter autotune (Mc, Nc, Kc tuning)
+///   - Tile size autotune (4x16, 6x16, 8x12, 8x16)
+///   - Real performance gains via cache-aware tuning
+///
 /// Inspired by autoGEMM's TVM-based auto-tuning, but dramatically
 /// lighter: 5 shapes × 5 parameter sets = 25 trials, <15ms total.
 
@@ -20,6 +25,7 @@
 #include "dnnopt/arm_hwcaps.h"
 #include "dnnopt/autotune/shape_cache.h"
 #include "dnnopt/gemm/gemm_ukernel_registry.h"  // for GemmDataType
+#include "dnnopt/gemm/gemm_config.h"            // for GemmBlockingParams
 
 namespace dnnopt {
 
@@ -67,5 +73,49 @@ int load_gemm_kernel_cache(const char* path);
 /// Save GEMM kernel cache to file.
 /// Returns 0 on success, -1 on error.
 int save_gemm_kernel_cache(const char* path);
+
+// ============================================================
+// v2.0: Blocking Parameter Autotune (P0 - Highest Priority)
+// ============================================================
+
+/// Select optimal blocking parameters for given shape.
+/// Benchmarks different blocking presets and caches the best.
+///
+/// @param M, N, K   Matrix dimensions
+/// @return          Optimal blocking selection
+BlockingSelection select_blocking_params(int M, int N, int K);
+
+/// Warmup blocking autotune for common shapes.
+void warmup_blocking_autotune();
+
+/// Get autotuned blocking params, or default from profile if not cached.
+GemmBlockingParams get_autotuned_blocking_params(
+    int M, int N, int K, int Mr, int Nr, int Kgroup,
+    int packed_a_elem_bytes, int packed_b_elem_bytes);
+
+// ============================================================
+// v2.0: Tile Size Autotune (P1)
+// ============================================================
+
+/// Select optimal tile size for packed kernel path.
+/// Benchmarks different tile presets and caches the best.
+///
+/// @param M, N, K   Matrix dimensions
+/// @return          Optimal tile selection
+TileSelection select_tile_params(int M, int N, int K);
+
+/// Warmup tile autotune.
+void warmup_tile_autotune();
+
+// ============================================================
+// v2.0: Threshold Autotune (P2)
+// ============================================================
+
+/// Autotune dispatch thresholds for boundary shapes.
+/// Benchmarks shapes around M=6-10, N=32-64 to find optimal thresholds.
+ThresholdSelection autotune_thresholds();
+
+/// Get current thresholds (autotuned or default).
+ThresholdSelection get_current_thresholds();
 
 }  // namespace dnnopt

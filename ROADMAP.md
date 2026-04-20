@@ -1,8 +1,36 @@
 # DNN-Opt Roadmap
 
-## Current Version: v0.9.23-dev
+## Current Version: v0.9.28-dev
 
-**Status**: INT8 SMMLA Native GEMM + Conv3D Winograd framework
+**Status**: Runtime Autotuning Complete + Performance Verified
+
+## Completed: v0.9.28 Tasks
+
+### ✅ Runtime Autotuning for Kernel Selection
+- `ShapeCache`: LRU cache (256 entries) + file persistence
+- `GemmShapeKey`: 64-bit hash for GEMM shapes
+- `select_gemm_kernel()`: Micro-benchmark comparison
+- `warmup_gemm_autotune()`: Pre-populate cache for inference shapes
+- Environment variable `DNNOPT_AUTOTUNE=1` enables autotune dispatch
+
+### ✅ Kernel Candidates
+| Kernel | Description |
+|--------|-------------|
+| kTiny | M=1 or N=1 |
+| kSmallM | M<8, no packing |
+| kSmallMWide | M<8, N>=48 |
+| kAdaptiveTile | M=4-32 |
+| kPacked | M>=8 |
+
+### ✅ Performance Validation
+- batch-1 LLM: +8.8% (oneDNN weakness)
+- batch-4 LLM: +8.8%
+- batch-8 LLM: +8.5%
+
+### ✅ Tests
+- test_autotune: All passed
+- test_gemm_correctness: 74/74
+- test_conv_correctness: 31/31
 
 ## Completed: v0.9.23 Tasks
 

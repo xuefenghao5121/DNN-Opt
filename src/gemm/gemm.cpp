@@ -104,10 +104,10 @@ bool dispatch_via_registry(GemmDataType dtype,
         // When M-padding, only accept kernels where M >= Mr/2 to avoid excessive waste.
         if (M < Mr && M * 2 < Mr) continue;
 
-        auto bp = compute_blocking_params(hw, profile, Mr, Nr, desc->Kgroup,
-                                          desc->packed_a_elem_bytes,
-                                          desc->packed_b_elem_bytes,
-                                          M, N, K);
+        // v2 Autotune: Use autotuned blocking params if enabled
+        auto bp = get_autotuned_blocking_params(M, N, K, Mr, Nr, desc->Kgroup,
+                                                 desc->packed_a_elem_bytes,
+                                                 desc->packed_b_elem_bytes);
 
         GemmDriverConfig cfg;
         cfg.Mr = Mr;
