@@ -60,6 +60,7 @@ enum class GemmKernelId : uint8_t {
     kAdaptiveTile = 2,   // M=4-32, unpacked (gemm_adaptive_tile)
     kPacked       = 3,   // M>=32, packing + threading (registry)
     kTiny         = 4,   // N=1 or M=1 (gemm_tiny_dispatch)
+    kSME          = 5,   // SME FMOPA outer product (hardware accelerated)
 };
 
 /// Kernel ID for Conv2D

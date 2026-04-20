@@ -146,6 +146,7 @@ void test_gemm_kernel_selection() {
         case dnnopt::GemmKernelId::kSmallMWide: name = "SmallMWide"; break;
         case dnnopt::GemmKernelId::kAdaptiveTile: name = "AdaptiveTile"; break;
         case dnnopt::GemmKernelId::kPacked:     name = "Packed"; break;
+        case dnnopt::GemmKernelId::kSME:        name = "SME"; break;
         }
 
         printf("  Shape %d×%d×%d → %s (%s expected)\n",

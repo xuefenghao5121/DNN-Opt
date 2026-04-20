@@ -34,7 +34,12 @@ option(DNNOPT_ENABLE_SME "Enable SME kernels (requires SME-capable hardware)" OF
 # Compiler flags
 # ============================================================
 if(DNNOPT_AARCH64)
-    if(DNNOPT_NATIVE_ARCH)
+    # SME takes precedence (requires ARMv9-A)
+    if(DNNOPT_ENABLE_SME)
+        message(STATUS "SME support: ENABLED")
+        set(ARCH_FLAGS "-march=armv9-a+sme+bf16+dotprod+fp16+i8mm")
+        add_definitions(-DDNNOPT_HAS_SME)
+    elseif(DNNOPT_NATIVE_ARCH)
         # Use native arch with BF16 extension for Clang (needed for BF16 intrinsics)
         if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
             set(ARCH_FLAGS "-march=armv8.5-a+bf16+dotprod+fp16+i8mm")
@@ -49,21 +54,6 @@ if(DNNOPT_AARCH64)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${ARCH_FLAGS}")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${ARCH_FLAGS}")
     set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} ${ARCH_FLAGS}")
-endif()
-
-# ============================================================
-# SME Support
-# ============================================================
-if(DNNOPT_ENABLE_SME)
-    message(STATUS "SME support: ENABLED")
-    # SME requires ARMv9-A architecture
-    set(SME_FLAGS "-march=armv9-a+sme+sme-i16i64+sme-f64f64")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${SME_FLAGS}")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${SME_FLAGS}")
-    set(CMAKE_ASM_FLAGS "${CMAKE_ASM_FLAGS} ${SME_FLAGS}")
-    add_definitions(-DDNNOPT_HAS_SME)
-else()
-    message(STATUS "SME support: DISABLED (use -DDNNOPT_ENABLE_SME=ON to enable)")
 endif()
 
 # Release flags

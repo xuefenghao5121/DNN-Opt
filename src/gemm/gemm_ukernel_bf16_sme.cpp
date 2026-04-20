@@ -94,7 +94,7 @@ static void gemm_ukernel_bf16_sme(int K,
             "fmopa za0.s, p0/m, p0/m, z0.s, z1.s\n\t"
             :
             : [a] "r"(a_ptr), [b] "r"(b_ptr)
-            : "z0", "z1", "p0", "za", "memory"
+            : "z0", "z1", "p0", "memory"
         );
     }
 

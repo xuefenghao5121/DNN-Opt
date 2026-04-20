@@ -264,13 +264,20 @@ static double bench_gemm_kernel(GemmKernelId kernel_id, int M, int N, int K) {
 /// Determine applicable kernels for a shape.
 static void get_candidate_kernels(int M, int N, int K,
                                    GemmKernelId* candidates,
-                                   int* n_candidates) {
+                                   int* n_candidates,
+                                   bool has_sme = false) {
     *n_candidates = 0;
 
     // Tiny: N=1 or M=1
     if (N == 1 || M == 1) {
         candidates[(*n_candidates)++] = GemmKernelId::kTiny;
         return;  // Tiny dominates
+    }
+
+    // SME: hardware accelerated outer product (highest priority when available)
+    // SME is optimal for M >= 8, N >= 8, K >= 1 (tile = SVL_words × SVL_words)
+    if (has_sme && M >= 8 && N >= 8) {
+        candidates[(*n_candidates)++] = GemmKernelId::kSME;
     }
 
     // Small-M: M < 8
@@ -299,10 +306,15 @@ static void get_candidate_kernels(int M, int N, int K,
 }
 
 GemmKernelId select_gemm_kernel(int M, int N, int K, GemmDataType dtype) {
+    // Check SME hardware capability
+    const auto& hw = detect_arm_hwcaps();
+    bool has_sme = (hw.hwcaps & kSME) != 0;
+
     // FP32 only for now (BF16/INT8 use same dispatch logic)
     if (dtype != GemmDataType::kFP32) {
         // Use heuristics for BF16/INT8
         if (M < 8) return GemmKernelId::kSmallM;
+        if (has_sme && M >= 8 && N >= 8) return GemmKernelId::kSME;
         return GemmKernelId::kPacked;
     }
 
@@ -322,10 +334,10 @@ GemmKernelId select_gemm_kernel(int M, int N, int K, GemmDataType dtype) {
         return static_cast<GemmKernelId>(cached->kernel_id);
     }
 
-    // Get candidate kernels
-    GemmKernelId candidates[5];
+    // Get candidate kernels (with SME if available)
+    GemmKernelId candidates[6];
     int n_candidates;
-    get_candidate_kernels(M, N, K, candidates, &n_candidates);
+    get_candidate_kernels(M, N, K, candidates, &n_candidates, has_sme);
 
     // If only one candidate, use it directly
     if (n_candidates == 1) {
