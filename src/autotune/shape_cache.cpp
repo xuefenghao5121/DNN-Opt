@@ -279,6 +279,68 @@ size_t BlockingCache::size() const {
     return cache_.size();
 }
 
+// BlockingCache file persistence (format: key + preset + gflops + time_us)
+int BlockingCache::load_from_file(const char* path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return -1;
+
+    char magic[8];
+    uint32_t version, num_entries;
+    file.read(magic, 8);
+    file.read(reinterpret_cast<char*>(&version), 4);
+    file.read(reinterpret_cast<char*>(&num_entries), 4);
+
+    if (std::memcmp(magic, "DNNAUTO", 8) != 0 || version != 2) {
+        return -1;
+    }
+
+    clear();
+    for (uint32_t i = 0; i < num_entries && i < kMaxEntries; ++i) {
+        uint64_t key;
+        uint8_t preset;
+        float gflops;
+        uint32_t time_us;
+
+        file.read(reinterpret_cast<char*>(&key), 8);
+        file.read(reinterpret_cast<char*>(&preset), 1);
+        file.read(reinterpret_cast<char*>(&gflops), 4);
+        file.read(reinterpret_cast<char*>(&time_us), 4);
+
+        if (!file) break;
+
+        BlockingSelection sel;
+        sel.preset = static_cast<BlockingPreset>(preset);
+        sel.gflops = gflops;
+        sel.time_us = time_us;
+        sel.valid = true;
+        insert(key, sel);
+    }
+
+    return static_cast<int>(cache_.size());
+}
+
+int BlockingCache::save_to_file(const char* path) const {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) return -1;
+
+    uint32_t num_entries = static_cast<uint32_t>(cache_.size());
+    uint32_t version = 2;
+    file.write("DNNAUTO", 8);
+    file.write(reinterpret_cast<const char*>(&version), 4);
+    file.write(reinterpret_cast<const char*>(&num_entries), 4);
+
+    for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
+        uint64_t key = *it;
+        const auto& sel = cache_.at(key);
+        file.write(reinterpret_cast<const char*>(&key), 8);
+        file.write(reinterpret_cast<const char*>(&sel.preset), 1);
+        file.write(reinterpret_cast<const char*>(&sel.gflops), 4);
+        file.write(reinterpret_cast<const char*>(&sel.time_us), 4);
+    }
+
+    return file ? 0 : -1;
+}
+
 // ============================================================
 // TileCache Implementation (v2 Autotune)
 // ============================================================
@@ -322,6 +384,70 @@ void TileCache::clear() {
 
 size_t TileCache::size() const {
     return cache_.size();
+}
+
+// TileCache file persistence (format: key + preset + Mr + Nr + gflops)
+int TileCache::load_from_file(const char* path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return -1;
+
+    char magic[8];
+    uint32_t version, num_entries;
+    file.read(magic, 8);
+    file.read(reinterpret_cast<char*>(&version), 4);
+    file.read(reinterpret_cast<char*>(&num_entries), 4);
+
+    if (std::memcmp(magic, "DNNAUTO", 8) != 0 || version != 3) {
+        return -1;
+    }
+
+    clear();
+    for (uint32_t i = 0; i < num_entries && i < kMaxEntries; ++i) {
+        uint64_t key;
+        uint8_t preset, Mr, Nr;
+        float gflops;
+
+        file.read(reinterpret_cast<char*>(&key), 8);
+        file.read(reinterpret_cast<char*>(&preset), 1);
+        file.read(reinterpret_cast<char*>(&Mr), 1);
+        file.read(reinterpret_cast<char*>(&Nr), 1);
+        file.read(reinterpret_cast<char*>(&gflops), 4);
+
+        if (!file) break;
+
+        TileSelection sel;
+        sel.preset = static_cast<TilePreset>(preset);
+        sel.Mr = Mr;
+        sel.Nr = Nr;
+        sel.gflops = gflops;
+        sel.valid = true;
+        insert(key, sel);
+    }
+
+    return static_cast<int>(cache_.size());
+}
+
+int TileCache::save_to_file(const char* path) const {
+    std::ofstream file(path, std::ios::binary);
+    if (!file) return -1;
+
+    uint32_t num_entries = static_cast<uint32_t>(cache_.size());
+    uint32_t version = 3;
+    file.write("DNNAUTO", 8);
+    file.write(reinterpret_cast<const char*>(&version), 4);
+    file.write(reinterpret_cast<const char*>(&num_entries), 4);
+
+    for (auto it = lru_order_.begin(); it != lru_order_.end(); ++it) {
+        uint64_t key = *it;
+        const auto& sel = cache_.at(key);
+        file.write(reinterpret_cast<const char*>(&key), 8);
+        file.write(reinterpret_cast<const char*>(&sel.preset), 1);
+        file.write(reinterpret_cast<const char*>(&sel.Mr), 1);
+        file.write(reinterpret_cast<const char*>(&sel.Nr), 1);
+        file.write(reinterpret_cast<const char*>(&sel.gflops), 4);
+    }
+
+    return file ? 0 : -1;
 }
 
 // ============================================================

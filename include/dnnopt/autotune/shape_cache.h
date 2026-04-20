@@ -187,6 +187,11 @@ public:
     void clear();
     size_t size() const;
 
+    /// Load cache from binary file.
+    int load_from_file(const char* path);
+    /// Save cache to binary file.
+    int save_to_file(const char* path) const;
+
 private:
     std::unordered_map<uint64_t, BlockingSelection> cache_;
     std::list<uint64_t> lru_order_;
@@ -204,6 +209,11 @@ public:
     void insert(uint64_t key, const TileSelection& sel);
     void clear();
     size_t size() const;
+
+    /// Load cache from binary file.
+    int load_from_file(const char* path);
+    /// Save cache to binary file.
+    int save_to_file(const char* path) const;
 
 private:
     std::unordered_map<uint64_t, TileSelection> cache_;

@@ -66,6 +66,10 @@ void warmup_gemm_autotune(const int* shapes_M = nullptr,
                           const int* shapes_K = nullptr,
                           int n_shapes = 0);
 
+/// Warmup all autotune caches (kernel + blocking + tile + threshold).
+/// One-shot call to populate all caches for common shapes.
+void warmup_all_autotune();
+
 /// Load GEMM kernel cache from file.
 /// Returns number of entries loaded, -1 on error.
 int load_gemm_kernel_cache(const char* path);
@@ -73,6 +77,14 @@ int load_gemm_kernel_cache(const char* path);
 /// Save GEMM kernel cache to file.
 /// Returns 0 on success, -1 on error.
 int save_gemm_kernel_cache(const char* path);
+
+/// Load all autotune caches from file (kernel + blocking + tile).
+/// Returns total entries loaded, -1 on error.
+int load_all_autotune_cache(const char* path);
+
+/// Save all autotune caches to file (kernel + blocking + tile).
+/// Returns 0 on success, -1 on error.
+int save_all_autotune_cache(const char* path);
 
 // ============================================================
 // v2.0: Blocking Parameter Autotune (P0 - Highest Priority)

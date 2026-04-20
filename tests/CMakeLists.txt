@@ -24,6 +24,10 @@ if(DNNOPT_BUILD_TESTS)
     target_link_libraries(test_autotune PRIVATE dnnopt_core)
     add_test(NAME test_autotune COMMAND test_autotune)
 
+    add_executable(test_autotune_warmup test_autotune_warmup.cpp)
+    target_link_libraries(test_autotune_warmup PRIVATE dnnopt_core)
+    add_test(NAME test_autotune_warmup COMMAND test_autotune_warmup)
+
     if(DNNOPT_BUILD_BLAS)
         add_executable(test_cblas test_cblas.cpp)
         target_link_libraries(test_cblas PRIVATE dnnopt_blas)
