@@ -12,7 +12,7 @@
 
 ## Current Version: v2.2
 
-**Status**: SME 编译 + Autotune 集成完成
+**Status**: SME + Autotune 完全集成
 
 ### SME Kernel 支持 ✅
 
@@ -26,11 +26,24 @@ cmake 选项: `-DDNNOPT_ENABLE_SME=ON -DCMAKE_C_COMPILER=clang-15`
 
 **编译 Flags:** `-march=armv9-a+sme+bf16+dotprod+fp16+i8mm`
 
-### SME Autotune 集成 ✅
+### SME Autotune 完全集成 ✅
 
-GemmKernelId 新增 `kSME`:
-- SME 硬件上 SME 作为候选 benchmark vs Packed
-- Shape-aware selection: M>=8, N>=8 触发 SME 候选
+| 层级 | 状态 | 集成点 |
+|------|------|--------|
+| Kernel selection | ✅ | select_gemm_kernel() → kSME |
+| SME dispatch | ✅ | gemm.cpp switch case kSME |
+| Tile autotune | ✅ | dispatch_via_registry() |
+| Threshold autotune | ✅ | gemm.cpp dispatch |
+
+**Autotune 流程 (DNNOPT_AUTOTUNE=1):**
+
+```
+Shape M×N×K:
+  ├─ select_gemm_kernel() → kernel ID
+  ├─ select_tile_params() → Mr, Nr
+  ├─ get_autotuned_blocking_params() → Mc, Nc, Kc
+  └─ get_current_thresholds() → dispatch bounds
+```
 
 ### SVE Kernel 支持 ✅
 
@@ -40,16 +53,16 @@ GemmKernelId 新增 `kSME`:
 | gemm_ukernel_bf16_sve.cpp | ✅ |
 | gemm_ukernel_int8_sve.cpp | ✅ |
 
-### Autotune 功能
+### Autotune 功能 (完整)
 
-| 功能 | 状态 |
-|------|------|
-| Kernel selection | ✅ (含 SME) |
-| Blocking autotune | ✅ |
-| Tile autotune | ✅ |
-| Threshold autotune | ✅ |
-| Warmup | ✅ `warmup_all_autotune()` |
-| Persistence | ✅ `load/save_all_autotune_cache()` |
+| 功能 | 状态 | API |
+|------|------|-----|
+| Kernel selection | ✅ | select_gemm_kernel() |
+| Blocking autotune | ✅ | get_autotuned_blocking_params() |
+| Tile autotune | ✅ | select_tile_params() |
+| Threshold autotune | ✅ | get_current_thresholds() |
+| Warmup | ✅ | warmup_all_autotune() |
+| Persistence | ✅ | load/save_all_autotune_cache() |
 
 ### Small-M SVE Kernel ✅
 
@@ -70,9 +83,10 @@ GemmKernelId 新增 `kSME`:
 
 ### v2.2 (2026-04-20)
 - SME 编译验证完成 (Clang 15)
-- SME Autotune 集成 (kSME kernel selection)
-- NEON-SVE bridge memory fallback
-- SVE kernel switch-case unrolling
+- SME Autotune 完全集成 (kSME + dispatch + tile + threshold)
+- Tile autotune 集成到 dispatch_via_registry
+- Threshold autotune 集成到 gemm.cpp dispatch
+- gemm_sme.cpp skeleton 清理
 
 ### v2.1 (2026-04-20)
 - Small-M SVE kernel
@@ -88,4 +102,18 @@ cd build_sme
 cmake .. -DDNNOPT_ENABLE_SME=ON -DCMAKE_C_COMPILER=clang-15 -DCMAKE_CXX_COMPILER=clang++-15
 cmake --build . -j$(nproc)
 ctest  # 100% passed (8/8)
+```
+
+## 使用 Autotune
+
+```bash
+# 启用 autotune
+export DNNOPT_AUTOTUNE=1
+
+# Warmup (预填充缓存)
+./bench_gemm  # 自动 warmup 常用 shapes
+
+# 持久化缓存
+# load_all_autotune_cache("/path/to/cache.bin")
+# save_all_autotune_cache("/path/to/cache.bin")
 ```
