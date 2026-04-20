@@ -164,6 +164,7 @@ int ShapeCache::save_to_file(const char* path) const {
 static ShapeCache g_gemm_cache;
 static ShapeCache g_conv_cache;
 static BlockingCache g_blocking_cache;
+static TileCache g_tile_cache;
 static ThresholdCache g_threshold_cache;
 
 ShapeCache& get_gemm_shape_cache() {
@@ -178,6 +179,10 @@ BlockingCache& get_blocking_cache() {
     return g_blocking_cache;
 }
 
+TileCache& get_tile_cache() {
+    return g_tile_cache;
+}
+
 ThresholdCache& get_threshold_cache() {
     return g_threshold_cache;
 }
@@ -186,6 +191,7 @@ void clear_all_shape_caches() {
     g_gemm_cache.clear();
     g_conv_cache.clear();
     g_blocking_cache.clear();
+    g_tile_cache.clear();
     g_threshold_cache.clear();
 }
 
@@ -216,6 +222,16 @@ BlockingParams get_blocking_params_from_preset(BlockingPreset preset) {
         break;
     }
     return p;
+}
+
+void get_tile_params_from_preset(TilePreset preset, int& Mr, int& Nr) {
+    switch (preset) {
+    case TilePreset::k4x16:  Mr = 4;  Nr = 16; break;
+    case TilePreset::k6x16:  Mr = 6;  Nr = 16; break;
+    case TilePreset::k8x12:  Mr = 8;  Nr = 12; break;
+    case TilePreset::k8x16:  Mr = 8;  Nr = 16; break;
+    default:                 Mr = 8;  Nr = 12; break;  // Standard FP32
+    }
 }
 
 // ============================================================
@@ -260,6 +276,51 @@ void BlockingCache::clear() {
 }
 
 size_t BlockingCache::size() const {
+    return cache_.size();
+}
+
+// ============================================================
+// TileCache Implementation (v2 Autotune)
+// ============================================================
+
+TileCache::TileCache() {}
+
+const TileSelection* TileCache::lookup(uint64_t key) const {
+    auto it = cache_.find(key);
+    if (it == cache_.end()) return nullptr;
+    return &it->second;
+}
+
+void TileCache::insert(uint64_t key, const TileSelection& sel) {
+    auto it = cache_.find(key);
+    if (it != cache_.end()) {
+        it->second = sel;
+        lru_order_.remove(key);
+        lru_order_.push_front(key);
+        return;
+    }
+
+    while (cache_.size() >= kMaxEntries) {
+        evict_oldest();
+    }
+
+    cache_[key] = sel;
+    lru_order_.push_front(key);
+}
+
+void TileCache::evict_oldest() {
+    if (lru_order_.empty()) return;
+    uint64_t oldest_key = lru_order_.back();
+    lru_order_.pop_back();
+    cache_.erase(oldest_key);
+}
+
+void TileCache::clear() {
+    cache_.clear();
+    lru_order_.clear();
+}
+
+size_t TileCache::size() const {
     return cache_.size();
 }
 

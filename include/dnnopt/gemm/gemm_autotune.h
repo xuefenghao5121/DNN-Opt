@@ -94,6 +94,20 @@ GemmBlockingParams get_autotuned_blocking_params(
     int packed_a_elem_bytes, int packed_b_elem_bytes);
 
 // ============================================================
+// v2.0: Tile Size Autotune (P1)
+// ============================================================
+
+/// Select optimal tile size for packed kernel path.
+/// Benchmarks different tile presets and caches the best.
+///
+/// @param M, N, K   Matrix dimensions
+/// @return          Optimal tile selection
+TileSelection select_tile_params(int M, int N, int K);
+
+/// Warmup tile autotune.
+void warmup_tile_autotune();
+
+// ============================================================
 // v2.0: Threshold Autotune (P2)
 // ============================================================
 

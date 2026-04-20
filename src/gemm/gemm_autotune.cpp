@@ -593,8 +593,126 @@ void warmup_blocking_autotune() {
 }
 
 // ============================================================
-// v2.0: Threshold Autotune
+// v2.0: Tile Size Autotune
 // ============================================================
+
+/// Micro-benchmark tile size for a shape.
+/// NOTE: Uses heuristic dispatch (not autotune) to avoid recursive benchmarking.
+static double bench_tile_for_shape(int M, int N, int K, TilePreset preset) {
+    // For tile benchmark, we test packed kernel performance
+    auto A = aligned_array<float>(M * K);
+    auto B = aligned_array<float>(K * N);
+    auto C = aligned_array<float>(M * N);
+
+    for (int i = 0; i < M * K; ++i) A.get()[i] = 0.01f * (i % 37);
+    for (int i = 0; i < K * N; ++i) B.get()[i] = 0.01f * (i % 41);
+    std::memset(C.get(), 0, M * N * sizeof(float));
+
+    Timer timer;
+
+    // CRITICAL: Disable autotune during benchmark to avoid recursive calls
+    char* old_env = std::getenv("DNNOPT_AUTOTUNE");
+    unsetenv("DNNOPT_AUTOTUNE");
+
+    // Warmup
+    gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+
+    // Benchmark
+    double times[3];
+    for (int t = 0; t < 3; ++t) {
+        std::memset(C.get(), 0, M * N * sizeof(float));
+        timer.start();
+        gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+        timer.stop();
+        times[t] = timer.elapsed_us();
+    }
+
+    // Restore autotune env
+    if (old_env) setenv("DNNOPT_AUTOTUNE", old_env, 1);
+
+    if (times[0] > times[1]) std::swap(times[0], times[1]);
+    if (times[1] > times[2]) std::swap(times[1], times[2]);
+    if (times[0] > times[1]) std::swap(times[0], times[1]);
+    return times[1];
+}
+
+TileSelection select_tile_params(int M, int N, int K) {
+    // Tile selection is most relevant for packed path (M >= 8)
+    if (M < 8) {
+        // Small-M uses dedicated kernels, not packed
+        TileSelection sel;
+        sel.preset = TilePreset::k8x12;  // Default
+        sel.Mr = 8;
+        sel.Nr = 12;
+        sel.valid = false;  // Not applicable for small-M
+        return sel;
+    }
+
+    GemmShapeKey key;
+    key.M = (M > 65535) ? 65535 : M;
+    key.N = (N > 65535) ? 65535 : N;
+    key.K = (K > 65535) ? 65535 : K;
+    key.dtype = 0;
+    key.algo = 2;  // algo=2 indicates tile selection
+    uint64_t hash = key.hash();
+
+    auto& cache = get_tile_cache();
+    const TileSelection* cached = cache.lookup(hash);
+    if (cached && cached->valid) {
+        return *cached;
+    }
+
+    // Benchmark tile presets
+    TilePreset presets[4] = {
+        TilePreset::k4x16,
+        TilePreset::k6x16,
+        TilePreset::k8x12,
+        TilePreset::k8x16,
+    };
+
+    TilePreset best_preset = TilePreset::k8x12;
+    double best_time = 1e18;
+
+    // For M near 4/6, those tiles may be better
+    // For M >= 8, 8x12 or 8x16
+    int n_presets = 4;
+    if (M < 6) n_presets = 1;  // Just 4x16 for M < 6
+    else if (M < 8) n_presets = 2;  // 4x16, 6x16 for M=6-7
+
+    for (int i = 0; i < n_presets; ++i) {
+        double t = bench_tile_for_shape(M, N, K, presets[i]);
+        if (t < best_time) {
+            best_time = t;
+            best_preset = presets[i];
+        }
+    }
+
+    TileSelection sel;
+    sel.preset = best_preset;
+    int Mr, Nr;
+    get_tile_params_from_preset(best_preset, Mr, Nr);
+    sel.Mr = static_cast<uint8_t>(Mr);
+    sel.Nr = static_cast<uint8_t>(Nr);
+    sel.gflops = 2.0 * M * N * K / (best_time * 1000.0);
+    sel.valid = true;
+    cache.insert(hash, sel);
+
+    return sel;
+}
+
+void warmup_tile_autotune() {
+    int shapes[][3] = {
+        {8,   512,  512},
+        {16,  512,  512},
+        {32,  512,  512},
+        {64,  256,  256},
+        {128, 256,  256},
+    };
+
+    for (int i = 0; i < 5; ++i) {
+        select_tile_params(shapes[i][0], shapes[i][1], shapes[i][2]);
+    }
+}
 
 // ============================================================
 // v2.0: Threshold Autotune (P2)

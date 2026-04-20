@@ -111,6 +111,30 @@ struct BlockingParams {
 BlockingParams get_blocking_params_from_preset(BlockingPreset preset);
 
 // ============================================================
+// Tile Size Selection (v2 Autotune)
+// ============================================================
+
+/// Tile size candidates for packed kernels.
+enum class TilePreset : uint8_t {
+    k4x16  = 0,   // Mr=4, Nr=16 (asm kernel)
+    k6x16  = 1,   // Mr=6, Nr=16 (asm kernel)
+    k8x12  = 2,   // Mr=8, Nr=12 (NEON standard)
+    k8x16  = 3,   // Mr=8, Nr=16 (packed wide)
+};
+
+/// Tile selection result.
+struct TileSelection {
+    TilePreset preset;      // Selected tile preset
+    uint8_t    Mr;          // Row tile size
+    uint8_t    Nr;          // Column tile size
+    float      gflops;      // Measured performance
+    bool       valid;       // True if benchmark was run
+};
+
+/// Get (Mr, Nr) from tile preset.
+void get_tile_params_from_preset(TilePreset preset, int& Mr, int& Nr);
+
+// ============================================================
 // Shape Cache (LRU, 256 entries)
 // ============================================================
 
@@ -169,6 +193,24 @@ private:
     void evict_oldest();
 };
 
+/// LRU cache for tile size selection (v2 autotune).
+class TileCache {
+public:
+    static constexpr int kMaxEntries = 64;   // Tile selection for packed path only
+
+    TileCache();
+
+    const TileSelection* lookup(uint64_t key) const;
+    void insert(uint64_t key, const TileSelection& sel);
+    void clear();
+    size_t size() const;
+
+private:
+    std::unordered_map<uint64_t, TileSelection> cache_;
+    std::list<uint64_t> lru_order_;
+    void evict_oldest();
+};
+
 // ============================================================
 // Threshold Selection (v2 Autotune)
 // ============================================================
@@ -209,6 +251,9 @@ ShapeCache& get_conv_shape_cache();
 
 /// Global blocking parameter cache singleton (v2 autotune).
 BlockingCache& get_blocking_cache();
+
+/// Global tile size cache singleton (v2 autotune).
+TileCache& get_tile_cache();
 
 /// Global threshold cache singleton (v2 autotune).
 ThresholdCache& get_threshold_cache();
