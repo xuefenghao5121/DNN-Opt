@@ -13,6 +13,7 @@ add_library(dnnopt_core STATIC
     gemm/gemm_pack_fp32.cpp
     gemm/gemm_ukernel_fp32_neon.cpp
     gemm/gemm_smallm_fp32.cpp
+    gemm/gemm_smallm_fp32_sve.cpp
     gemm/gemm_smallm_fp32_v2.cpp
     gemm/gemm_smallm_wide_fp32.cpp
     gemm/gemm_adaptive_tile_fp32.cpp

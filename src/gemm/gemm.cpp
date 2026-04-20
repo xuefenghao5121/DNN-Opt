@@ -52,6 +52,15 @@ bool gemm_tiny_dispatch_fp32(int M, int N, int K,
                               const float* B, int ldb,
                               float beta, float* C, int ldc);
 
+// Small-M SVE kernel (defined in gemm_smallm_fp32_sve.cpp)
+#ifdef __ARM_FEATURE_SVE
+void gemm_smallm_fp32_sve(int M, int N, int K,
+                          const float* A, int lda,
+                          const float* B, int ldb,
+                          float* C, int ldc,
+                          float alpha, float beta);
+#endif
+
 namespace {
 
 /// Check if autotune mode is enabled.
@@ -203,7 +212,14 @@ void gemm_fp32(int M, int N, int K,
         // M=1 uses dedicated GEMV path. M=4-7 with small N falls through to adaptive tile.
         // Phase 13: When N*K is very large, prefer packed path with threading instead
         // of small-M path — packing overhead is amortized and threading is beneficial.
+        // Phase 14: SVE kernel for small-M (predicate-based edge handling for irregular N).
         if (M < 8) {
+#ifdef __ARM_FEATURE_SVE
+            // SVE kernel: use predicate for N edge handling (irregular N, prime N)
+            // This is cleaner than NEON scalar tail handling.
+            gemm_smallm_fp32_sve(M, N, K, A, lda, B, ldb, C, ldc, alpha, beta);
+            return;
+#endif
 #ifdef __ARM_NEON
             if (M == 1) {
                 gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
