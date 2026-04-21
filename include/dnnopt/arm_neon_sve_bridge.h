@@ -13,21 +13,14 @@
 
 #if defined(__ARM_FEATURE_SVE)
 #include <arm_sve.h>
-
-namespace dnnopt {
-
-// ============================================================
-// Core Bridge Functions: NEON <-> SVE conversion
-// ============================================================
-
-// Check if svset_neonq intrinsics are available
-// Note: These are NOT available in Clang 15, despite __clang_major__ >= 13
-// They require Clang 16+ or GCC 10+
 #if __clang_major__ >= 16 || __GNUC__ >= 10
+#include <arm_neon_sve_bridge.h>
 #define DNNOPT_HAS_NEON_SVE_BRIDGE 1
 #else
 #define DNNOPT_HAS_NEON_SVE_BRIDGE 0
 #endif
+
+namespace dnnopt {
 
 /// Embed a NEON vector into the first 128-bit of an SVE vector.
 inline svfloat32_t neon_to_sve_f32(float32x4_t neon) {
