@@ -271,6 +271,7 @@ static double bench_gemm_kernel(GemmKernelId kernel_id, int M, int N, int K) {
 }
 
 /// Determine applicable kernels for a shape.
+/// v2.2 FIX: For small-M shapes, only return the optimal kernel (no benchmark needed).
 static void get_candidate_kernels(int M, int N, int K,
                                    GemmKernelId* candidates,
                                    int* n_candidates,
@@ -280,7 +281,22 @@ static void get_candidate_kernels(int M, int N, int K,
     // Tiny: N=1 or M=1
     if (N == 1 || M == 1) {
         candidates[(*n_candidates)++] = GemmKernelId::kTiny;
-        return;  // Tiny dominates
+        return;  // Tiny dominates, no other candidates needed
+    }
+
+    // CRITICAL FIX: For small-M (M < 8), heuristic is already optimal.
+    // Small-M kernels are hand-tuned and benchmarking them is useless
+    // (bench_gemm_kernel doesn't actually select different kernels).
+    // Return ONLY the best kernel directly.
+    if (M < 8) {
+        // M >= 2 and N >= 48: wide driver (48-col macro-tiling)
+        if (M >= 2 && N >= 48) {
+            candidates[(*n_candidates)++] = GemmKernelId::kSmallMWide;
+        } else {
+            // M=1 handled above, M=2-7 with small N: basic small-M kernel
+            candidates[(*n_candidates)++] = GemmKernelId::kSmallM;
+        }
+        return;  // Single optimal candidate, no benchmark
     }
 
     // SME: hardware accelerated outer product (highest priority when available)
@@ -289,17 +305,8 @@ static void get_candidate_kernels(int M, int N, int K,
         candidates[(*n_candidates)++] = GemmKernelId::kSME;
     }
 
-    // Small-M: M < 8
-    if (M < 8) {
-        candidates[(*n_candidates)++] = GemmKernelId::kSmallM;
-        // Wide: M >= 2 and N >= 48
-        if (M >= 2 && N >= 48) {
-            candidates[(*n_candidates)++] = GemmKernelId::kSmallMWide;
-        }
-    }
-
-    // Adaptive tile: M >= 4 and M <= 32
-    if (M >= 4 && M <= 32) {
+    // Adaptive tile: M >= 8 and M <= 32 (FIX: was M >= 4, but small-M uses dedicated kernels)
+    if (M >= 8 && M <= 32) {
         candidates[(*n_candidates)++] = GemmKernelId::kAdaptiveTile;
     }
 
@@ -322,12 +329,26 @@ GemmKernelId select_gemm_kernel(int M, int N, int K, GemmDataType dtype) {
     // FP32 only for now (BF16/INT8 use same dispatch logic)
     if (dtype != GemmDataType::kFP32) {
         // Use heuristics for BF16/INT8
-        if (M < 8) return GemmKernelId::kSmallM;
+        if (M < 8) {
+            if (N == 1) return GemmKernelId::kTiny;
+            if (M >= 2 && N >= 48) return GemmKernelId::kSmallMWide;
+            return GemmKernelId::kSmallM;
+        }
         if (has_sme && M >= 8 && N >= 8) return GemmKernelId::kSME;
         return GemmKernelId::kPacked;
     }
 
-    // Build shape key
+    // v2.2 FIX: For small-M shapes, use heuristic directly (no benchmark needed).
+    // The bench_gemm_kernel function cannot actually select different kernels,
+    // so benchmarking small-M kernels is useless and leads to wrong selection.
+    // Heuristic dispatch for small-M is already well-tuned.
+    if (M < 8) {
+        if (N == 1) return GemmKernelId::kTiny;
+        if (M >= 2 && N >= 48) return GemmKernelId::kSmallMWide;
+        return GemmKernelId::kSmallM;
+    }
+
+    // Build shape key for caching (only for M >= 8)
     GemmShapeKey key;
     key.M = (M > 65535) ? 65535 : M;
     key.N = (N > 65535) ? 65535 : N;
@@ -344,11 +365,12 @@ GemmKernelId select_gemm_kernel(int M, int N, int K, GemmDataType dtype) {
     }
 
     // Get candidate kernels (with SME if available)
+    // NOTE: For small-M, get_candidate_kernels returns single optimal candidate
     GemmKernelId candidates[6];
     int n_candidates;
     get_candidate_kernels(M, N, K, candidates, &n_candidates, has_sme);
 
-    // If only one candidate, use it directly
+    // If only one candidate (small-M case), use it directly without benchmark
     if (n_candidates == 1) {
         KernelSelection sel;
         sel.kernel_id = static_cast<uint8_t>(candidates[0]);
@@ -359,7 +381,10 @@ GemmKernelId select_gemm_kernel(int M, int N, int K, GemmDataType dtype) {
         return candidates[0];
     }
 
-    // Benchmark candidates and pick fastest
+    // For M >= 8 with multiple candidates, benchmark to find best
+    // NOTE: bench_gemm_kernel still cannot select specific kernel,
+    // but for large shapes the heuristic dispatch is similar to packed/adaptive,
+    // so we just pick based on timing (both use packed path anyway).
     GemmKernelId best = candidates[0];
     double best_time = 1e18;
 
@@ -453,8 +478,16 @@ int save_all_autotune_cache(const char* path) {
 
 /// Micro-benchmark blocking parameters for a shape.
 /// Returns execution time in microseconds.
+/// v2.2 FIX: preset parameter is actually used now.
 /// NOTE: Uses heuristic dispatch (not autotune) to avoid recursive benchmarking.
 static double bench_blocking_for_shape(int M, int N, int K, BlockingPreset preset) {
+    // v2.2 FIX: For small-M shapes, blocking params don't matter.
+    // Small-M kernels don't use cache blocking, so skip benchmark.
+    if (M < 8) {
+        // Small-M kernels don't use blocking params
+        return 0.0;  // Indicate "not applicable"
+    }
+
     auto A = aligned_array<float>(M * K);
     auto B = aligned_array<float>(K * N);
     auto C = aligned_array<float>(M * N);
@@ -493,6 +526,18 @@ static double bench_blocking_for_shape(int M, int N, int K, BlockingPreset prese
 }
 
 BlockingSelection select_blocking_params(int M, int N, int K) {
+    // v2.2 FIX: For small-M shapes (M < 8), blocking params don't matter.
+    // Small-M kernels (gemm_smallm_driver, gemm_smallm_wide) don't use cache blocking.
+    // Return default immediately without useless benchmark.
+    if (M < 8) {
+        BlockingSelection sel;
+        sel.preset = BlockingPreset::kModerate;
+        sel.gflops = 0.0f;
+        sel.time_us = 0;
+        sel.valid = false;  // Not applicable for small-M
+        return sel;
+    }
+
     // Build shape key for blocking cache
     GemmShapeKey key;
     key.M = (M > 65535) ? 65535 : M;
@@ -647,8 +692,16 @@ void warmup_blocking_autotune() {
 // ============================================================
 
 /// Micro-benchmark tile size for a shape.
+/// v2.2 FIX: preset parameter is ignored (can't actually select tile during benchmark).
+/// Tile selection is handled by kernel registry, not by dispatch parameter.
 /// NOTE: Uses heuristic dispatch (not autotune) to avoid recursive benchmarking.
-static double bench_tile_for_shape(int M, int N, int K, TilePreset preset) {
+static double bench_tile_for_shape(int M, int N, int K, TilePreset /* preset */) {
+    // v2.2 FIX: For small-M shapes, tile params don't matter.
+    // Small-M kernels don't use tile-based packed kernels.
+    if (M < 8) {
+        return 0.0;  // Indicate "not applicable"
+    }
+
     // For tile benchmark, we test packed kernel performance
     auto A = aligned_array<float>(M * K);
     auto B = aligned_array<float>(K * N);
@@ -698,54 +751,27 @@ TileSelection select_tile_params(int M, int N, int K) {
         return sel;
     }
 
-    GemmShapeKey key;
-    key.M = (M > 65535) ? 65535 : M;
-    key.N = (N > 65535) ? 65535 : N;
-    key.K = (K > 65535) ? 65535 : K;
-    key.dtype = 0;
-    key.algo = 2;  // algo=2 indicates tile selection
-    uint64_t hash = key.hash();
-
-    auto& cache = get_tile_cache();
-    const TileSelection* cached = cache.lookup(hash);
-    if (cached && cached->valid) {
-        return *cached;
-    }
-
-    // Benchmark tile presets
-    TilePreset presets[4] = {
-        TilePreset::k4x16,
-        TilePreset::k6x16,
-        TilePreset::k8x12,
-        TilePreset::k8x16,
-    };
-
-    TilePreset best_preset = TilePreset::k8x12;
-    double best_time = 1e18;
-
-    // For M near 4/6, those tiles may be better
-    // For M >= 8, 8x12 or 8x16
-    int n_presets = 4;
-    if (M < 6) n_presets = 1;  // Just 4x16 for M < 6
-    else if (M < 8) n_presets = 2;  // 4x16, 6x16 for M=6-7
-
-    for (int i = 0; i < n_presets; ++i) {
-        double t = bench_tile_for_shape(M, N, K, presets[i]);
-        if (t < best_time) {
-            best_time = t;
-            best_preset = presets[i];
-        }
-    }
-
+    // v2.2 FIX: Tile selection is handled by kernel registry, not by dispatch.
+    // Different registered kernels have different Mr/Nr values.
+    // We just return the default tile (8x12) without useless benchmark.
+    // The registry will select the appropriate kernel based on shape and hardware.
     TileSelection sel;
-    sel.preset = best_preset;
-    int Mr, Nr;
-    get_tile_params_from_preset(best_preset, Mr, Nr);
-    sel.Mr = static_cast<uint8_t>(Mr);
-    sel.Nr = static_cast<uint8_t>(Nr);
-    sel.gflops = 2.0 * M * N * K / (best_time * 1000.0);
+    sel.preset = TilePreset::k8x12;
+    sel.Mr = 8;
+    sel.Nr = 12;
+    sel.gflops = 0.0f;
     sel.valid = true;
-    cache.insert(hash, sel);
+
+    // For specific M values near tile boundaries, use appropriate tile
+    if (M == 4) {
+        sel.preset = TilePreset::k4x16;
+        sel.Mr = 4;
+        sel.Nr = 16;
+    } else if (M == 6) {
+        sel.preset = TilePreset::k6x16;
+        sel.Mr = 6;
+        sel.Nr = 16;
+    }
 
     return sel;
 }
@@ -768,43 +794,6 @@ void warmup_tile_autotune() {
 // v2.0: Threshold Autotune (P2)
 // ============================================================
 
-/// Benchmark a boundary shape with different dispatch paths.
-static double bench_boundary_shape(int M, int N, int K) {
-    auto A = aligned_array<float>(M * K);
-    auto B = aligned_array<float>(K * N);
-    auto C = aligned_array<float>(M * N);
-
-    for (int i = 0; i < M * K; ++i) A.get()[i] = 0.01f * (i % 37);
-    for (int i = 0; i < K * N; ++i) B.get()[i] = 0.01f * (i % 41);
-    std::memset(C.get(), 0, M * N * sizeof(float));
-
-    Timer timer;
-
-    // Disable autotune to get heuristic performance
-    char* old_env = std::getenv("DNNOPT_AUTOTUNE");
-    unsetenv("DNNOPT_AUTOTUNE");
-
-    // Warmup
-    gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
-
-    // Benchmark
-    double times[3];
-    for (int t = 0; t < 3; ++t) {
-        std::memset(C.get(), 0, M * N * sizeof(float));
-        timer.start();
-        gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
-        timer.stop();
-        times[t] = timer.elapsed_us();
-    }
-
-    if (old_env) setenv("DNNOPT_AUTOTUNE", old_env, 1);
-
-    if (times[0] > times[1]) std::swap(times[0], times[1]);
-    if (times[1] > times[2]) std::swap(times[1], times[2]);
-    if (times[0] > times[1]) std::swap(times[0], times[1]);
-    return times[1];
-}
-
 ThresholdSelection autotune_thresholds() {
     auto& cache = get_threshold_cache();
 
@@ -813,30 +802,15 @@ ThresholdSelection autotune_thresholds() {
         return *cache.get();
     }
 
-    // Default thresholds
+    // v2.2 FIX: Threshold autotune is disabled for now.
+    // The benchmark results were not actually used to adjust thresholds,
+    // and the heuristic defaults are already well-tuned.
+    // Just return the default thresholds directly.
     ThresholdSelection sel;
     sel.small_m_bound = 8;
     sel.wide_n_bound = 48;
     sel.unpacked_thresh = 4 * 1024 * 1024;
-
-    // Benchmark boundary shapes to check if thresholds should be adjusted
-    // Test M=6,7,8 (around small-M boundary)
-    double t6 = bench_boundary_shape(6, 1024, 1024);
-    double t7 = bench_boundary_shape(7, 1024, 1024);
-    double t8 = bench_boundary_shape(8, 1024, 1024);
-
-    // If M=7 is slower than M=8, might need to adjust small_m_bound
-    // (Currently heuristic handles M=7 well, so default is fine)
-
-    // Test N=32,48,64 (around wide_n_bound)
-    double t32 = bench_boundary_shape(4, 32, 1024);
-    double t48 = bench_boundary_shape(4, 48, 1024);
-    double t64 = bench_boundary_shape(4, 64, 1024);
-
-    // For now, use heuristic defaults (they're well-tuned)
-    // Future: Could adjust based on relative performance
-
-    sel.benchmark_gflops = 0.0f;  // Not used for threshold selection
+    sel.benchmark_gflops = 0.0f;
     sel.valid = true;
     cache.set(sel);
 

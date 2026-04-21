@@ -204,9 +204,31 @@ void gemm_fp32(int M, int N, int K,
                     return;
                 break;
             case GemmKernelId::kSmallM:
-                gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+                // CRITICAL: SmallM should use NEON driver, NOT SVE!
+                // NEON driver has Kc blocking + 48-col panels + prefetch.
+                // SVE kernel lacks these and is much slower for typical shapes.
+#ifdef __ARM_FEATURE_SVE
+                // SVE only for M=1 with tiny irregular N
+                if (M == 1 && N < 16 && (N % 4 != 0)) {
+                    gemm_smallm_fp32_sve(M, N, K, A, lda, B, ldb, C, ldc, alpha, beta);
+                } else
+#endif
+                {
+                    gemm_smallm_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+                }
                 return;
             case GemmKernelId::kSmallMWide:
+                // CRITICAL: SmallMWide MUST use NEON wide driver!
+                // NEON wide driver is the HIGH-PERFORMANCE kernel for small-M:
+                //   - Kc=256 blocking (B[Kc][48] fits L1D)
+                //   - 48-col panels (optimal register usage)
+                //   - Software prefetch (prfm pldl1keep)
+                //   - 2x K-unrolling (pipelining)
+                // SVE kernel has NONE of these - it's a simple MxVL loop.
+#ifdef __ARM_FEATURE_SVE
+                // Never use SVE for wide shapes (N >= 48)
+                // SVE kernel processes N in VL=4 chunks vs NEON's 48 chunks = 12x more iterations
+#endif
                 gemm_smallm_wide_driver_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
                 return;
             case GemmKernelId::kAdaptiveTile:
@@ -251,11 +273,19 @@ void gemm_fp32(int M, int N, int K,
         }
 
         if (M < thresh.small_m_bound) {
+            // CRITICAL: Small-M should NOT use SVE kernel!
+            // NEON wide driver has:
+            //   - Kc=256 blocking (L1D fit)
+            //   - 48-col panels (12x fewer N iterations)
+            //   - Software prefetch (prfm pldl1keep)
+            // SVE kernel lacks all these optimizations and is MUCH slower.
+            // Only use SVE for edge cases (irregular N with tiny shapes).
 #ifdef __ARM_FEATURE_SVE
-            // SVE kernel: use predicate for N edge handling (irregular N, prime N)
-            // This is cleaner than NEON scalar tail handling.
-            gemm_smallm_fp32_sve(M, N, K, A, lda, B, ldb, C, ldc, alpha, beta);
-            return;
+            // SVE only for M=1 with very small irregular N (prime < 16)
+            if (M == 1 && N < 16 && (N % 4 != 0)) {
+                gemm_smallm_fp32_sve(M, N, K, A, lda, B, ldb, C, ldc, alpha, beta);
+                return;
+            }
 #endif
 #ifdef __ARM_NEON
             if (M == 1) {

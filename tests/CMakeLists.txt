@@ -35,6 +35,9 @@ if(DNNOPT_BUILD_TESTS)
     endif()
 
     # Benchmarks
+    add_executable(bench_fix_verification bench_fix_verification.cpp)
+    target_link_libraries(bench_fix_verification PRIVATE dnnopt_core)
+
     if(DNNOPT_BUILD_BLAS)
         add_executable(bench_tf_like_inference bench_tf_like_inference.cpp)
         # Link against oneDNN for dnnl_sgemm comparison
