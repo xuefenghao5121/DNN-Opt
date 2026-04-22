@@ -419,19 +419,19 @@ static void gemm_tall_skinny_n4(int M, int K,
             s0 = vfmaq_laneq_f32(s0, bk2, av, 2);
             s0 = vfmaq_laneq_f32(s0, bk3, av, 3);
 
-            av = {a1[k], a1[k+1], a1[k+2], a1[k+3]};
+            av = vld1q_f32(&a1[k]);
             s1 = vfmaq_laneq_f32(s1, bk0, av, 0);
             s1 = vfmaq_laneq_f32(s1, bk1, av, 1);
             s1 = vfmaq_laneq_f32(s1, bk2, av, 2);
             s1 = vfmaq_laneq_f32(s1, bk3, av, 3);
 
-            av = {a2[k], a2[k+1], a2[k+2], a2[k+3]};
+            av = vld1q_f32(&a2[k]);
             s2 = vfmaq_laneq_f32(s2, bk0, av, 0);
             s2 = vfmaq_laneq_f32(s2, bk1, av, 1);
             s2 = vfmaq_laneq_f32(s2, bk2, av, 2);
             s2 = vfmaq_laneq_f32(s2, bk3, av, 3);
 
-            av = {a3[k], a3[k+1], a3[k+2], a3[k+3]};
+            av = vld1q_f32(&a3[k]);
             s3 = vfmaq_laneq_f32(s3, bk0, av, 0);
             s3 = vfmaq_laneq_f32(s3, bk1, av, 1);
             s3 = vfmaq_laneq_f32(s3, bk2, av, 2);

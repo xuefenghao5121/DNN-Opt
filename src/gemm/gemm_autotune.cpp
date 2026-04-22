@@ -10,6 +10,8 @@
 #include "dnnopt/gemm/gemm_autotune.h"
 #include "dnnopt/gemm/gemm_config.h"
 #include "dnnopt/gemm/gemm.h"
+#include "dnnopt/gemm/gemm_driver_generic.h"
+#include "dnnopt/gemm/gemm_ukernel_registry.h"
 #include "dnnopt/aligned_alloc.h"
 #include "dnnopt/timer.h"
 
@@ -476,18 +478,136 @@ int save_all_autotune_cache(const char* path) {
 // v2.0: Blocking Parameter Autotune
 // ============================================================
 
-/// Micro-benchmark blocking parameters for a shape.
-/// Returns execution time in microseconds.
-/// v2.2 FIX: preset parameter is actually used now.
-/// NOTE: Uses heuristic dispatch (not autotune) to avoid recursive benchmarking.
-static double bench_blocking_for_shape(int M, int N, int K, BlockingPreset preset) {
+/// Direct benchmark of blocking parameters using packed kernel.
+/// This function bypasses the normal dispatch and calls gemm_driver_generic
+/// directly with custom blocking params derived from the preset.
+/// Returns execution time in microseconds, or 0.0 if not applicable.
+/// v2.3 FIX: Now applies shape-aware multiplier (was missing, causing perf degradation).
+static double bench_blocking_direct(int M, int N, int K, BlockingPreset preset) {
     // v2.2 FIX: For small-M shapes, blocking params don't matter.
     // Small-M kernels don't use cache blocking, so skip benchmark.
     if (M < 8) {
-        // Small-M kernels don't use blocking params
         return 0.0;  // Indicate "not applicable"
     }
 
+    // Get hardware profile and kernel from registry
+    const auto& hw = detect_arm_hwcaps();
+    const auto& profile = lookup_tuning_profile(hw);
+    auto candidates = GemmUkernelRegistry::instance().select_all(GemmDataType::kFP32, hw);
+
+    // Find first kernel that fits M (M >= Mr)
+    const GemmMicrokernelDesc* desc = nullptr;
+    for (const auto* c : candidates) {
+        if (M >= c->Mr) {
+            desc = c;
+            break;
+        }
+    }
+
+    if (!desc) {
+        // No suitable kernel found
+        return 0.0;
+    }
+
+    int Mr = desc->Mr;
+    int Nr = desc->nr_is_vla ? desc->compute_nr(hw.sve_vector_bits) : desc->Nr;
+
+    // Get blocking params from preset
+    auto bp = get_blocking_params_from_preset(preset);
+
+    // CRITICAL FIX v2.3: Apply shape-aware multiplier!
+    // Without this, tall-skinny/short-wide shapes would get wrong blocking params.
+    ShapeClass sc = classify_shape(M, N, K);
+
+    float l1d_util = bp.l1d_util;
+    float l2_util  = bp.l2_util;
+    float l3_util  = bp.l3_util;
+    float mc_max_f = (float)profile.mc_max;
+    float nc_max_f = (float)profile.nc_max;
+
+    switch (sc) {
+    case ShapeClass::kTallSkinny: {
+        const auto& a = profile.shape_adj_tall_skinny;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kShortWide: {
+        const auto& a = profile.shape_adj_short_wide;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kSmallGemm: {
+        const auto& a = profile.shape_adj_small;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kBertLike: {
+        const auto& a = profile.shape_adj_bert;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kSquare:
+    default:
+        break;
+    }
+
+    int mc_max = std::max((int)mc_max_f, Mr);
+    int nc_max = std::max((int)nc_max_f, Nr);
+
+    // Compute actual blocking params using shape-adjusted utilization ratios
+    uint32_t l1d_bytes = hw.l1d.size_bytes;
+    uint32_t l2_bytes = hw.l2.size_bytes;
+    uint32_t l3_bytes = hw.l3.size_bytes;
+
+    if (l1d_bytes == 0) l1d_bytes = 64 * 1024;
+    if (l2_bytes == 0) l2_bytes = 1024 * 1024;
+
+    int Kgroup = desc->Kgroup;
+    int packed_a_elem_bytes = desc->packed_a_elem_bytes;
+    int packed_b_elem_bytes = desc->packed_b_elem_bytes;
+
+    // Kc from shape-adjusted l1d_util
+    int bytes_per_k = Mr * packed_a_elem_bytes + Nr * packed_b_elem_bytes;
+    if (bytes_per_k <= 0) bytes_per_k = 1;
+    int Kc = (int)(l1d_bytes * l1d_util) / bytes_per_k;
+    if (Kgroup > 1) Kc = (Kc / Kgroup) * Kgroup;
+    Kc = std::max(Kc, Kgroup);
+    Kc = std::min(Kc, K);
+
+    // Mc from shape-adjusted l2_util
+    int a_panel_bytes_per_m = Kc * packed_a_elem_bytes;
+    if (a_panel_bytes_per_m <= 0) a_panel_bytes_per_m = 1;
+    int Mc = (int)(l2_bytes * l2_util) / a_panel_bytes_per_m;
+    Mc = (Mc / Mr) * Mr;
+    Mc = std::max(Mc, Mr);
+    Mc = std::min(Mc, std::min(M, mc_max));
+
+    // Nc from shape-adjusted l3_util
+    uint32_t nc_cache = (l3_bytes > 0) ? l3_bytes : l2_bytes;
+    int b_panel_bytes_per_n = Kc * packed_b_elem_bytes;
+    if (b_panel_bytes_per_n <= 0) b_panel_bytes_per_n = 1;
+    int Nc = (int)(nc_cache * l3_util) / b_panel_bytes_per_n;
+    Nc = (Nc / Nr) * Nr;
+    Nc = std::max(Nc, Nr);
+    Nc = std::min(Nc, std::min(N, nc_max));
+
+    // Allocate matrices
     auto A = aligned_array<float>(M * K);
     auto B = aligned_array<float>(K * N);
     auto C = aligned_array<float>(M * N);
@@ -496,33 +616,51 @@ static double bench_blocking_for_shape(int M, int N, int K, BlockingPreset prese
     for (int i = 0; i < K * N; ++i) B.get()[i] = 0.01f * (i % 41);
     std::memset(C.get(), 0, M * N * sizeof(float));
 
+    // Build driver config with custom blocking params
+    GemmDriverConfig cfg;
+    cfg.Mr = Mr;
+    cfg.Nr = Nr;
+    cfg.Kgroup = Kgroup;
+    cfg.Mc = Mc;
+    cfg.Nc = Nc;
+    cfg.Kc = Kc;
+    cfg.packed_a_elem_bytes = packed_a_elem_bytes;
+    cfg.packed_b_elem_bytes = packed_b_elem_bytes;
+    cfg.dtype = GemmDataType::kFP32;
+    cfg.ukernel = desc->ukernel;
+    cfg.pack_a = desc->pack_a;
+    cfg.pack_b = desc->pack_b;
+    cfg.threading_min_flops = 200000;
+    cfg.prefer_2d_threading = true;
+    cfg.shape = sc;  // Use classified shape
+
     Timer timer;
 
-    // CRITICAL: Disable autotune during benchmark to avoid recursive calls
-    // We're benchmarking blocking presets, not triggering kernel selection
-    char* old_env = std::getenv("DNNOPT_AUTOTUNE");
-    unsetenv("DNNOPT_AUTOTUNE");
-
-    // Warmup
-    gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+    // Warmup (1 iteration)
+    gemm_driver_generic(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N, cfg);
 
     // Benchmark (median of 3)
     double times[3];
     for (int t = 0; t < 3; ++t) {
         std::memset(C.get(), 0, M * N * sizeof(float));
         timer.start();
-        gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+        gemm_driver_generic(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N, cfg);
         timer.stop();
         times[t] = timer.elapsed_us();
     }
-
-    // Restore autotune env
-    if (old_env) setenv("DNNOPT_AUTOTUNE", old_env, 1);
 
     if (times[0] > times[1]) std::swap(times[0], times[1]);
     if (times[1] > times[2]) std::swap(times[1], times[2]);
     if (times[0] > times[1]) std::swap(times[0], times[1]);
     return times[1];
+}
+
+/// Micro-benchmark blocking parameters for a shape.
+/// Returns execution time in microseconds.
+/// v2.3 FIX: Now actually tests different blocking presets!
+static double bench_blocking_for_shape(int M, int N, int K, BlockingPreset preset) {
+    // Use direct packed kernel benchmark
+    return bench_blocking_direct(M, N, K, preset);
 }
 
 BlockingSelection select_blocking_params(int M, int N, int K) {
@@ -554,14 +692,22 @@ BlockingSelection select_blocking_params(int M, int N, int K) {
         return *cached;
     }
 
-    // v2.0 optimization: Don't benchmark all presets for large shapes
-    // For very large shapes (cache-friendly), blocking presets have minimal impact
-    // For small-medium shapes (cache-sensitive), blocking matters more
-
+    // v2.3: Shape-aware preset selection
     int64_t vol = (int64_t)M * N * K;
+    ShapeClass sc = classify_shape(M, N, K);
 
-    // Quick heuristic for very large shapes - use profile default
-    if (vol > 64 * 1024 * 1024) {  // > 64M elements (already cache-friendly)
+    // Select presets based on shape class
+    // Tall-skinny: larger Mc, smaller Nc → prefer higher l2_util
+    // Short-wide: larger Nc, smaller Mc → prefer higher l3_util
+    // Square: balanced → moderate
+    BlockingPreset presets_to_test[5];
+    int n_presets = 0;
+
+    // Always test Moderate as baseline
+    presets_to_test[n_presets++] = BlockingPreset::kModerate;
+
+    // For very large shapes (cache-friendly), blocking presets have minimal impact
+    if (vol > 64 * 1024 * 1024) {  // > 64M elements
         BlockingSelection sel;
         sel.preset = BlockingPreset::kModerate;
         sel.gflops = 0.0f;
@@ -571,26 +717,32 @@ BlockingSelection select_blocking_params(int M, int N, int K) {
         return sel;
     }
 
-    // For shapes where blocking matters, benchmark key presets
-    // Only test 3 presets (Conservative, Moderate, Aggressive) instead of 5
-    BlockingPreset presets_to_test[3] = {
-        BlockingPreset::kConservative,  // Small cache usage
-        BlockingPreset::kModerate,      // Balanced (default)
-        BlockingPreset::kAggressive,    // Large cache usage
-    };
+    // Shape-specific presets
+    if (sc == ShapeClass::kTallSkinny) {
+        // Tall-skinny: more L2 (for large Mc), less L3
+        presets_to_test[n_presets++] = BlockingPreset::kAggressive;  // high l2_util
+        presets_to_test[n_presets++] = BlockingPreset::kMaximum;     // even higher l2
+    } else if (sc == ShapeClass::kShortWide) {
+        // Short-wide: more L3 (for large Nc), less L2
+        presets_to_test[n_presets++] = BlockingPreset::kConservative; // lower l2, higher l3 ratio
+        presets_to_test[n_presets++] = BlockingPreset::kStandard;     // balanced
+    } else if (sc == ShapeClass::kSmallGemm || sc == ShapeClass::kBertLike) {
+        // Small/BERT: memory-bound, conservative blocking
+        presets_to_test[n_presets++] = BlockingPreset::kConservative;
+        presets_to_test[n_presets++] = BlockingPreset::kStandard;
+    } else {
+        // Square: test full range
+        presets_to_test[n_presets++] = BlockingPreset::kConservative;
+        presets_to_test[n_presets++] = BlockingPreset::kAggressive;
+    }
 
+    // Benchmark each preset
     BlockingPreset best_preset = BlockingPreset::kModerate;
     double best_time = 1e18;
 
-    // For small shapes, only test 2 presets
-    int n_presets = 3;
-    if (vol < 4 * 1024 * 1024) {
-        n_presets = 2;  // Conservative + Moderate
-    }
-
     for (int i = 0; i < n_presets; ++i) {
         double t = bench_blocking_for_shape(M, N, K, presets_to_test[i]);
-        if (t < best_time) {
+        if (t > 0 && t < best_time) {  // t=0 means not applicable
             best_time = t;
             best_preset = presets_to_test[i];
         }
@@ -599,7 +751,7 @@ BlockingSelection select_blocking_params(int M, int N, int K) {
     // Cache result
     BlockingSelection sel;
     sel.preset = best_preset;
-    sel.gflops = 2.0 * M * N * K / (best_time * 1000.0);
+    sel.gflops = (best_time > 0) ? 2.0 * M * N * K / (best_time * 1000.0) : 0.0f;
     sel.time_us = static_cast<uint32_t>(best_time);
     sel.valid = true;
     cache.insert(hash, sel);
@@ -619,11 +771,66 @@ GemmBlockingParams get_autotuned_blocking_params(
     bool autotune_enabled = env != nullptr && (env[0] == '1' || env[0] == 'y' || env[0] == 'Y');
 
     if (autotune_enabled) {
+        // CRITICAL FIX v2.3: Apply shape-aware multiplier before computing blocking!
+        // The original compute_blocking_params() applies shape-aware adjustments,
+        // but bench_blocking_direct() and this function were missing them.
+        // This could cause performance degradation for tall-skinny/short-wide shapes.
+
         auto sel = select_blocking_params(M, N, K);
         auto bp = get_blocking_params_from_preset(sel.preset);
 
-        // Compute blocking params with autotuned utilization ratios
-        // (Re-use compute_blocking_params logic but override ratios)
+        // Get shape-aware multipliers from profile
+        ShapeClass sc = classify_shape(M, N, K);
+
+        float l1d_util = bp.l1d_util;
+        float l2_util  = bp.l2_util;
+        float l3_util  = bp.l3_util;
+        float mc_max_f = (float)profile.mc_max;
+        float nc_max_f = (float)profile.nc_max;
+
+        // Apply shape-aware adjustments (same logic as compute_blocking_params)
+        switch (sc) {
+        case ShapeClass::kTallSkinny: {
+            const auto& a = profile.shape_adj_tall_skinny;
+            l1d_util *= a.l1d_mult;
+            l2_util  *= a.l2_mult;
+            l3_util  *= a.l3_mult;
+            mc_max_f *= a.mc_mult;
+            nc_max_f *= a.nc_mult;
+            break;
+        }
+        case ShapeClass::kShortWide: {
+            const auto& a = profile.shape_adj_short_wide;
+            l1d_util *= a.l1d_mult;
+            l2_util  *= a.l2_mult;
+            l3_util  *= a.l3_mult;
+            mc_max_f *= a.mc_mult;
+            nc_max_f *= a.nc_mult;
+            break;
+        }
+        case ShapeClass::kSmallGemm: {
+            const auto& a = profile.shape_adj_small;
+            l1d_util *= a.l1d_mult;
+            l2_util  *= a.l2_mult;
+            l3_util  *= a.l3_mult;
+            mc_max_f *= a.mc_mult;
+            nc_max_f *= a.nc_mult;
+            break;
+        }
+        case ShapeClass::kBertLike: {
+            const auto& a = profile.shape_adj_bert;
+            l1d_util *= a.l1d_mult;
+            l2_util  *= a.l2_mult;
+            l3_util  *= a.l3_mult;
+            mc_max_f *= a.mc_mult;
+            nc_max_f *= a.nc_mult;
+            break;
+        }
+        case ShapeClass::kSquare:
+        default:
+            break;
+        }
+
         GemmBlockingParams p;
         p.Mr = Mr;
         p.Nr = Nr;
@@ -635,30 +842,33 @@ GemmBlockingParams get_autotuned_blocking_params(
         if (l1d_bytes == 0) l1d_bytes = 64 * 1024;
         if (l2_bytes == 0) l2_bytes = 1024 * 1024;
 
-        // Kc from autotuned l1d_util
+        int mc_max = std::max((int)mc_max_f, Mr);
+        int nc_max = std::max((int)nc_max_f, Nr);
+
+        // Kc from autotuned + shape-adjusted l1d_util
         int bytes_per_k = Mr * packed_a_elem_bytes + Nr * packed_b_elem_bytes;
         if (bytes_per_k <= 0) bytes_per_k = 1;
-        int Kc = (int)(l1d_bytes * bp.l1d_util) / bytes_per_k;
+        int Kc = (int)(l1d_bytes * l1d_util) / bytes_per_k;
         if (Kgroup > 1) Kc = (Kc / Kgroup) * Kgroup;
         Kc = std::max(Kc, Kgroup);
         Kc = std::min(Kc, K);
 
-        // Mc from autotuned l2_util
+        // Mc from autotuned + shape-adjusted l2_util
         int a_panel_bytes_per_m = Kc * packed_a_elem_bytes;
         if (a_panel_bytes_per_m <= 0) a_panel_bytes_per_m = 1;
-        int Mc = (int)(l2_bytes * bp.l2_util) / a_panel_bytes_per_m;
+        int Mc = (int)(l2_bytes * l2_util) / a_panel_bytes_per_m;
         Mc = (Mc / Mr) * Mr;
         Mc = std::max(Mc, Mr);
-        Mc = std::min(Mc, std::min(M, profile.mc_max));
+        Mc = std::min(Mc, std::min(M, mc_max));
 
-        // Nc from autotuned l3_util
+        // Nc from autotuned + shape-adjusted l3_util
         uint32_t nc_cache = (l3_bytes > 0) ? l3_bytes : l2_bytes;
         int b_panel_bytes_per_n = Kc * packed_b_elem_bytes;
         if (b_panel_bytes_per_n <= 0) b_panel_bytes_per_n = 1;
-        int Nc = (int)(nc_cache * bp.l3_util) / b_panel_bytes_per_n;
+        int Nc = (int)(nc_cache * l3_util) / b_panel_bytes_per_n;
         Nc = (Nc / Nr) * Nr;
         Nc = std::max(Nc, Nr);
-        Nc = std::min(Nc, std::min(N, profile.nc_max));
+        Nc = std::min(Nc, std::min(N, nc_max));
 
         p.Mc = Mc;
         p.Nc = Nc;
@@ -666,23 +876,30 @@ GemmBlockingParams get_autotuned_blocking_params(
         return p;
     }
 
-    // Fallback to default profile
+    // Fallback to default profile (with shape-aware adjustments built-in)
     return compute_blocking_params(hw, profile, Mr, Nr, Kgroup,
                                    packed_a_elem_bytes, packed_b_elem_bytes,
                                    M, N, K);
 }
 
 void warmup_blocking_autotune() {
-    // Warmup blocking cache for key shapes
+    // Warmup blocking cache for key shapes covering different shape classes
     int shapes[][3] = {
+        // Square shapes
         {512,  512,  512},
         {1024, 1024, 1024},
-        {4,    1024, 1024},
+        // Tall-skinny shapes (M >> N) - prefer large Mc
+        {1024, 64,   1024},
+        {2048, 128,  2048},
+        // Short-wide shapes (N >> M) - prefer large Nc
+        {64,   1024, 1024},
+        {128,  2048, 2048},
+        // Small/BERT-like shapes
         {32,   512,  512},
         {128,  256,  256},
     };
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 8; ++i) {
         select_blocking_params(shapes[i][0], shapes[i][1], shapes[i][2]);
     }
 }
@@ -691,18 +908,139 @@ void warmup_blocking_autotune() {
 // v2.0: Tile Size Autotune
 // ============================================================
 
-/// Micro-benchmark tile size for a shape.
-/// v2.2 FIX: preset parameter is ignored (can't actually select tile during benchmark).
-/// Tile selection is handled by kernel registry, not by dispatch parameter.
-/// NOTE: Uses heuristic dispatch (not autotune) to avoid recursive benchmarking.
-static double bench_tile_for_shape(int M, int N, int K, TilePreset /* preset */) {
-    // v2.2 FIX: For small-M shapes, tile params don't matter.
-    // Small-M kernels don't use tile-based packed kernels.
-    if (M < 8) {
-        return 0.0;  // Indicate "not applicable"
+/// Direct benchmark of tile size using specific kernel from registry.
+/// This function bypasses the priority-based kernel selection and directly
+/// tests a kernel with specific Mr/Nr tile size.
+/// Returns execution time in microseconds, or 0.0 if no matching kernel.
+static double bench_tile_direct(int M, int N, int K, int target_Mr, int target_Nr) {
+    // Tile benchmark only meaningful for packed path (M >= Mr)
+    if (M < target_Mr) {
+        return 0.0;  // Shape too small for this tile
     }
 
-    // For tile benchmark, we test packed kernel performance
+    // Get hardware profile
+    const auto& hw = detect_arm_hwcaps();
+    const auto& profile = lookup_tuning_profile(hw);
+
+    // Get all registered kernels and find one with matching Mr/Nr
+    auto all_kernels = GemmUkernelRegistry::instance().select_all(GemmDataType::kFP32, hw);
+
+    const GemmMicrokernelDesc* target_desc = nullptr;
+    for (const auto* k : all_kernels) {
+        if (k->Mr == target_Mr && k->Nr == target_Nr && !k->nr_is_vla) {
+            target_desc = k;
+            break;
+        }
+        // Also allow VLA kernels to match Nr dynamically
+        if (k->Mr == target_Mr && k->nr_is_vla) {
+            int computed_nr = k->compute_nr(hw.sve_vector_bits);
+            if (computed_nr == target_Nr) {
+                target_desc = k;
+                break;
+            }
+        }
+    }
+
+    if (!target_desc) {
+        // No matching kernel found
+        return 0.0;
+    }
+
+    int Mr = target_desc->Mr;
+    int Nr = target_desc->nr_is_vla ? target_desc->compute_nr(hw.sve_vector_bits) : target_desc->Nr;
+    int Kgroup = target_desc->Kgroup;
+
+    // Compute blocking params (use moderate preset as baseline)
+    auto bp = get_blocking_params_from_preset(BlockingPreset::kModerate);
+
+    // Apply shape-aware adjustments
+    ShapeClass sc = classify_shape(M, N, K);
+    float l1d_util = bp.l1d_util;
+    float l2_util  = bp.l2_util;
+    float l3_util  = bp.l3_util;
+    float mc_max_f = (float)profile.mc_max;
+    float nc_max_f = (float)profile.nc_max;
+
+    switch (sc) {
+    case ShapeClass::kTallSkinny: {
+        const auto& a = profile.shape_adj_tall_skinny;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kShortWide: {
+        const auto& a = profile.shape_adj_short_wide;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kSmallGemm: {
+        const auto& a = profile.shape_adj_small;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kBertLike: {
+        const auto& a = profile.shape_adj_bert;
+        l1d_util *= a.l1d_mult;
+        l2_util  *= a.l2_mult;
+        l3_util  *= a.l3_mult;
+        mc_max_f *= a.mc_mult;
+        nc_max_f *= a.nc_mult;
+        break;
+    }
+    case ShapeClass::kSquare:
+    default:
+        break;
+    }
+
+    int mc_max = std::max((int)mc_max_f, Mr);
+    int nc_max = std::max((int)nc_max_f, Nr);
+
+    // Get cache sizes
+    uint32_t l1d_bytes = hw.l1d.size_bytes;
+    uint32_t l2_bytes = hw.l2.size_bytes;
+    uint32_t l3_bytes = hw.l3.size_bytes;
+
+    if (l1d_bytes == 0) l1d_bytes = 64 * 1024;
+    if (l2_bytes == 0) l2_bytes = 1024 * 1024;
+
+    int packed_a_elem_bytes = target_desc->packed_a_elem_bytes;
+    int packed_b_elem_bytes = target_desc->packed_b_elem_bytes;
+
+    // Compute Kc, Mc, Nc
+    int bytes_per_k = Mr * packed_a_elem_bytes + Nr * packed_b_elem_bytes;
+    if (bytes_per_k <= 0) bytes_per_k = 1;
+    int Kc = (int)(l1d_bytes * l1d_util) / bytes_per_k;
+    if (Kgroup > 1) Kc = (Kc / Kgroup) * Kgroup;
+    Kc = std::max(Kc, Kgroup);
+    Kc = std::min(Kc, K);
+
+    int a_panel_bytes_per_m = Kc * packed_a_elem_bytes;
+    if (a_panel_bytes_per_m <= 0) a_panel_bytes_per_m = 1;
+    int Mc = (int)(l2_bytes * l2_util) / a_panel_bytes_per_m;
+    Mc = (Mc / Mr) * Mr;
+    Mc = std::max(Mc, Mr);
+    Mc = std::min(Mc, std::min(M, mc_max));
+
+    uint32_t nc_cache = (l3_bytes > 0) ? l3_bytes : l2_bytes;
+    int b_panel_bytes_per_n = Kc * packed_b_elem_bytes;
+    if (b_panel_bytes_per_n <= 0) b_panel_bytes_per_n = 1;
+    int Nc = (int)(nc_cache * l3_util) / b_panel_bytes_per_n;
+    Nc = (Nc / Nr) * Nr;
+    Nc = std::max(Nc, Nr);
+    Nc = std::min(Nc, std::min(N, nc_max));
+
+    // Allocate matrices
     auto A = aligned_array<float>(M * K);
     auto B = aligned_array<float>(K * N);
     auto C = aligned_array<float>(M * N);
@@ -711,27 +1049,38 @@ static double bench_tile_for_shape(int M, int N, int K, TilePreset /* preset */)
     for (int i = 0; i < K * N; ++i) B.get()[i] = 0.01f * (i % 41);
     std::memset(C.get(), 0, M * N * sizeof(float));
 
+    // Build driver config with specific tile kernel
+    GemmDriverConfig cfg;
+    cfg.Mr = Mr;
+    cfg.Nr = Nr;
+    cfg.Kgroup = Kgroup;
+    cfg.Mc = Mc;
+    cfg.Nc = Nc;
+    cfg.Kc = Kc;
+    cfg.packed_a_elem_bytes = packed_a_elem_bytes;
+    cfg.packed_b_elem_bytes = packed_b_elem_bytes;
+    cfg.dtype = GemmDataType::kFP32;
+    cfg.ukernel = target_desc->ukernel;
+    cfg.pack_a = target_desc->pack_a;
+    cfg.pack_b = target_desc->pack_b;
+    cfg.threading_min_flops = 200000;
+    cfg.prefer_2d_threading = true;
+    cfg.shape = sc;
+
     Timer timer;
 
-    // CRITICAL: Disable autotune during benchmark to avoid recursive calls
-    char* old_env = std::getenv("DNNOPT_AUTOTUNE");
-    unsetenv("DNNOPT_AUTOTUNE");
+    // Warmup (1 iteration)
+    gemm_driver_generic(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N, cfg);
 
-    // Warmup
-    gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
-
-    // Benchmark
+    // Benchmark (median of 3)
     double times[3];
     for (int t = 0; t < 3; ++t) {
         std::memset(C.get(), 0, M * N * sizeof(float));
         timer.start();
-        gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+        gemm_driver_generic(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N, cfg);
         timer.stop();
         times[t] = timer.elapsed_us();
     }
-
-    // Restore autotune env
-    if (old_env) setenv("DNNOPT_AUTOTUNE", old_env, 1);
 
     if (times[0] > times[1]) std::swap(times[0], times[1]);
     if (times[1] > times[2]) std::swap(times[1], times[2]);
@@ -739,39 +1088,154 @@ static double bench_tile_for_shape(int M, int N, int K, TilePreset /* preset */)
     return times[1];
 }
 
+/// Tile candidate for autotune search.
+struct TileCandidate {
+    int Mr, Nr;
+    TilePreset preset;
+    const char* name;
+};
+
+/// Available tile sizes to benchmark.
+/// Order matters: try larger tiles first for better compute density.
+static const TileCandidate kTileCandidates[] = {
+    {8, 16, TilePreset::k8x16,  "8x16"},   // Highest priority: 128 FMLAs/K-step
+    {8, 12, TilePreset::k8x12,  "8x12"},   // Standard NEON: 96 FMLAs/K-step
+    {6, 16, TilePreset::k6x16,  "6x16"},   // For M=6 shapes: avoid padding
+    {4, 16, TilePreset::k4x16,  "4x16"},   // For M=4 shapes: avoid padding
+};
+
+static const int kNumTileCandidates = sizeof(kTileCandidates) / sizeof(kTileCandidates[0]);
+
 TileSelection select_tile_params(int M, int N, int K) {
     // Tile selection is most relevant for packed path (M >= 8)
-    if (M < 8) {
-        // Small-M uses dedicated kernels, not packed
+    // For M < 8, use dedicated small-M kernels (not packed)
+    if (M < 4) {
         TileSelection sel;
-        sel.preset = TilePreset::k8x12;  // Default
+        sel.preset = TilePreset::k8x12;  // Default (won't be used)
         sel.Mr = 8;
         sel.Nr = 12;
-        sel.valid = false;  // Not applicable for small-M
+        sel.valid = false;  // Not applicable for tiny/small-M
         return sel;
     }
 
-    // v2.2 FIX: Tile selection is handled by kernel registry, not by dispatch.
-    // Different registered kernels have different Mr/Nr values.
-    // We just return the default tile (8x12) without useless benchmark.
-    // The registry will select the appropriate kernel based on shape and hardware.
-    TileSelection sel;
-    sel.preset = TilePreset::k8x12;
-    sel.Mr = 8;
-    sel.Nr = 12;
-    sel.gflops = 0.0f;
-    sel.valid = true;
+    // Build shape key for tile cache
+    GemmShapeKey key;
+    key.M = (M > 65535) ? 65535 : M;
+    key.N = (N > 65535) ? 65535 : N;
+    key.K = (K > 65535) ? 65535 : K;
+    key.dtype = 0;
+    key.algo = 2;  // algo=2 indicates tile selection
+    uint64_t hash = key.hash();
 
-    // For specific M values near tile boundaries, use appropriate tile
-    if (M == 4) {
-        sel.preset = TilePreset::k4x16;
-        sel.Mr = 4;
-        sel.Nr = 16;
-    } else if (M == 6) {
-        sel.preset = TilePreset::k6x16;
-        sel.Mr = 6;
-        sel.Nr = 16;
+    // Check cache
+    auto& cache = get_tile_cache();
+    const TileSelection* cached = cache.lookup(hash);
+    if (cached && cached->valid) {
+        return *cached;
     }
+
+    // Determine which tiles are applicable for this shape
+    // Key insight: larger Mr better for compute density, but M padding wastes cycles
+    // For M that's not divisible by 8, prefer smaller Mr to minimize padding
+
+    TileCandidate applicable[4];
+    int n_applicable = 0;
+
+    // Always include tiles where M >= Mr
+    for (int i = 0; i < kNumTileCandidates; ++i) {
+        if (M >= kTileCandidates[i].Mr) {
+            applicable[n_applicable++] = kTileCandidates[i];
+        }
+    }
+
+    // For shapes where M is close to Mr boundary, use heuristic without benchmark
+    // E.g., M=6 should use 6x16 (no padding) instead of 8x16 (25% padding)
+    // M=4 should use 4x16 (no padding) instead of 8x16 (50% padding)
+    //
+    // Key insight: 8x16 has highest compute density (128 FMLAs per K-step),
+    // so prefer 8x16 when M is divisible by 8. Only use smaller tiles when
+    // M is NOT divisible by 8 but IS divisible by a smaller tile.
+
+    // Priority 1: M divisible by 8 → use 8x16 (highest compute density)
+    if (M % 8 == 0) {
+        TileSelection sel;
+        sel.preset = TilePreset::k8x16;
+        sel.Mr = 8;
+        sel.Nr = 16;
+        sel.gflops = 0.0f;
+        sel.valid = true;
+        cache.insert(hash, sel);
+        return sel;
+    }
+
+    // Priority 2: M NOT divisible by 8 but divisible by smaller tile → use that tile
+    for (int i = n_applicable - 1; i >= 0; --i) {  // Check smaller tiles first
+        if (applicable[i].Mr < 8 && M % applicable[i].Mr == 0) {
+            // M is perfectly divisible by this smaller tile - use it without benchmark
+            TileSelection sel;
+            sel.preset = applicable[i].preset;
+            sel.Mr = applicable[i].Mr;
+            sel.Nr = applicable[i].Nr;
+            sel.gflops = 0.0f;
+            sel.valid = true;
+            cache.insert(hash, sel);
+            return sel;
+        }
+    }
+
+    // For general shapes, benchmark to find best tile
+    // But limit benchmark to shapes where it matters (not too small, not too large)
+    int64_t vol = (int64_t)M * N * K;
+
+    // Very small shapes: benchmark overhead dominates, use heuristic
+    if (vol < 128 * 1024) {  // < 128K elements
+        // Find largest applicable tile
+        TileSelection sel;
+        sel.preset = applicable[0].preset;
+        sel.Mr = applicable[0].Mr;
+        sel.Nr = applicable[0].Nr;
+        sel.gflops = 0.0f;
+        sel.valid = true;
+        cache.insert(hash, sel);
+        return sel;
+    }
+
+    // Very large shapes: blocking params dominate, tile choice less critical
+    if (vol > 64 * 1024 * 1024) {  // > 64M elements
+        TileSelection sel;
+        sel.preset = TilePreset::k8x16;  // Default to highest compute density
+        sel.Mr = 8;
+        sel.Nr = 16;
+        sel.gflops = 0.0f;
+        sel.valid = true;
+        cache.insert(hash, sel);
+        return sel;
+    }
+
+    // Benchmark applicable tiles
+    TilePreset best_preset = applicable[0].preset;
+    int best_Mr = applicable[0].Mr;
+    int best_Nr = applicable[0].Nr;
+    double best_time = 1e18;
+
+    for (int i = 0; i < n_applicable; ++i) {
+        double t = bench_tile_direct(M, N, K, applicable[i].Mr, applicable[i].Nr);
+        if (t > 0 && t < best_time) {
+            best_time = t;
+            best_preset = applicable[i].preset;
+            best_Mr = applicable[i].Mr;
+            best_Nr = applicable[i].Nr;
+        }
+    }
+
+    // Cache result
+    TileSelection sel;
+    sel.preset = best_preset;
+    sel.Mr = best_Mr;
+    sel.Nr = best_Nr;
+    sel.gflops = (best_time > 0 && best_time < 1e18) ? 2.0 * M * N * K / (best_time * 1000.0) : 0.0f;
+    sel.valid = true;
+    cache.insert(hash, sel);
 
     return sel;
 }
@@ -791,8 +1255,80 @@ void warmup_tile_autotune() {
 }
 
 // ============================================================
-// v2.0: Threshold Autotune (P2)
+// v2.0: Threshold Autotune (P2) - v2.5 Implementation
 // ============================================================
+
+/// Boundary shapes for threshold benchmark
+static const int kThresholdMShapes[] = {6, 7, 8, 9, 10, 12};
+static const int kThresholdNShapes[] = {32, 40, 48, 56, 64};
+static const int kThresholdKShapes[] = {512, 1024, 2048};
+
+/// Threshold candidates to benchmark
+struct ThresholdCandidate {
+    uint8_t small_m_bound;
+    uint16_t wide_n_bound;
+    uint32_t unpacked_thresh;
+    const char* name;
+};
+
+static const ThresholdCandidate kThresholdCandidates[] = {
+    {6,  32, 2 * 1024 * 1024, "Conservative"},  // Smaller M-bound → more small-M path
+    {8,  48, 4 * 1024 * 1024, "Standard"},      // Current defaults
+    {10, 64, 6 * 1024 * 1024, "Aggressive"},    // Larger M-bound → more packed path
+};
+
+static const int kNumThresholdCandidates = sizeof(kThresholdCandidates) / sizeof(kThresholdCandidates[0]);
+
+/// Benchmark GEMM with specific threshold settings
+/// Returns median GFLOPS from multiple iterations
+static double bench_with_threshold(int M, int N, int K,
+                                   uint8_t small_m_bound,
+                                   uint16_t wide_n_bound,
+                                   uint32_t unpacked_thresh) {
+    auto A = aligned_array<float>(M * K);
+    auto B = aligned_array<float>(K * N);
+    auto C = aligned_array<float>(M * N);
+
+    for (int i = 0; i < M * K; ++i) A.get()[i] = 0.01f * (i % 37);
+    for (int i = 0; i < K * N; ++i) B.get()[i] = 0.01f * (i % 41);
+
+    // Clear caches
+    get_tile_cache().clear();
+    get_blocking_cache().clear();
+    get_gemm_shape_cache().clear();
+
+    // Set thresholds via cache injection
+    ThresholdSelection sel;
+    sel.small_m_bound = small_m_bound;
+    sel.wide_n_bound = wide_n_bound;
+    sel.unpacked_thresh = unpacked_thresh;
+    sel.benchmark_gflops = 0.0f;
+    sel.valid = true;
+    get_threshold_cache().set(sel);
+
+    // Enable autotune
+    setenv("DNNOPT_AUTOTUNE", "1", 1);
+
+    // Warmup + timed runs (median of 5)
+    Timer timer;
+    double times[5];
+
+    for (int w = 0; w < 3; ++w) {
+        std::memset(C.get(), 0, M * N * sizeof(float));
+        gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+    }
+
+    for (int t = 0; t < 5; ++t) {
+        std::memset(C.get(), 0, M * N * sizeof(float));
+        timer.start();
+        gemm_fp32(M, N, K, 1.0f, A.get(), K, B.get(), N, 0.0f, C.get(), N);
+        timer.stop();
+        times[t] = timer.elapsed_us();
+    }
+
+    std::sort(times, times + 5);
+    return 2.0 * M * N * K / (times[2] * 1000.0);
+}
 
 ThresholdSelection autotune_thresholds() {
     auto& cache = get_threshold_cache();
@@ -802,15 +1338,79 @@ ThresholdSelection autotune_thresholds() {
         return *cache.get();
     }
 
-    // v2.2 FIX: Threshold autotune is disabled for now.
-    // The benchmark results were not actually used to adjust thresholds,
-    // and the heuristic defaults are already well-tuned.
-    // Just return the default thresholds directly.
+    // CRITICAL: Set DNNOPT_AUTOTUNE before any gemm_fp32 call!
+    // is_autotune_enabled() uses static cache and only reads env var once.
+    // If not set before first gemm_fp32, benchmarks won't use autotune thresholds.
+    setenv("DNNOPT_AUTOTUNE", "1", 1);
+
+    // Benchmark key boundary shapes to find optimal thresholds
+    // Focus on shapes where threshold changes affect dispatch:
+    //   - M-boundary: M=6-12 (small-M vs packed)
+    //   - N-boundary: N=32-64 (wide driver threshold)
+    //   - Volume-boundary: shapes near 4M flops (adaptive vs packed)
+
+    double total_scores[kNumThresholdCandidates] = {0};
+    int n_shapes_tested = 0;
+
+    // Test M-boundary shapes (M=6,7,8,9,10,12)
+    for (int m_idx = 0; m_idx < 6; ++m_idx) {
+        int M = kThresholdMShapes[m_idx];
+        // Use representative N,K
+        int N = 1024, K = 1024;
+        int64_t vol = (int64_t)M * N * K;
+        if (vol > 4LL * 1024 * 1024 * 1024) continue;
+
+        for (int c = 0; c < kNumThresholdCandidates; ++c) {
+            double gf = bench_with_threshold(M, N, K,
+                kThresholdCandidates[c].small_m_bound,
+                kThresholdCandidates[c].wide_n_bound,
+                kThresholdCandidates[c].unpacked_thresh);
+
+            // Weight M-boundary shapes higher (dispatch decision critical)
+            double weight = 2.0;
+            total_scores[c] += weight * gf;
+        }
+        n_shapes_tested++;
+    }
+
+    // Test N-boundary shapes (M=4,6,7 with N=32-64)
+    int m_values[] = {4, 6, 7};
+    for (int m_val = 0; m_val < 3; ++m_val) {
+        int M = m_values[m_val];
+        for (int n_idx = 0; n_idx < 5; ++n_idx) {
+            int N = kThresholdNShapes[n_idx];
+            int K = 1024;
+
+            for (int c = 0; c < kNumThresholdCandidates; ++c) {
+                double gf = bench_with_threshold(M, N, K,
+                    kThresholdCandidates[c].small_m_bound,
+                    kThresholdCandidates[c].wide_n_bound,
+                    kThresholdCandidates[c].unpacked_thresh);
+
+                // Weight N-boundary shapes moderate
+                double weight = 1.0;
+                total_scores[c] += weight * gf;
+            }
+            n_shapes_tested++;
+        }
+    }
+
+    // Find best candidate
+    int best_idx = 0;
+    double best_score = total_scores[0];
+    for (int c = 1; c < kNumThresholdCandidates; ++c) {
+        if (total_scores[c] > best_score) {
+            best_score = total_scores[c];
+            best_idx = c;
+        }
+    }
+
+    // Cache result
     ThresholdSelection sel;
-    sel.small_m_bound = 8;
-    sel.wide_n_bound = 48;
-    sel.unpacked_thresh = 4 * 1024 * 1024;
-    sel.benchmark_gflops = 0.0f;
+    sel.small_m_bound = kThresholdCandidates[best_idx].small_m_bound;
+    sel.wide_n_bound = kThresholdCandidates[best_idx].wide_n_bound;
+    sel.unpacked_thresh = kThresholdCandidates[best_idx].unpacked_thresh;
+    sel.benchmark_gflops = best_score / n_shapes_tested;
     sel.valid = true;
     cache.set(sel);
 
