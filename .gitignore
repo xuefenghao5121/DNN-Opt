@@ -1,5 +1,8 @@
 # Build output
 build/
+build_sme/
+build_upstream/
+build_patched/
 install/
 
 # IDE
@@ -26,3 +29,24 @@ Thumbs.db
 
 # Temp analysis binaries (development artifacts)
 analyze_*
+
+# Test temp files
+Testing/
+
+# Development scripts
+python/
+tensorflow_custom_op/
+scripts/bench_tf_matmul.py
+
+# Local debug benchmarks (not for release)
+tests/bench_autotune_potential.cpp
+tests/bench_dispatch_path.cpp
+tests/bench_exotic_shapes.cpp
+tests/bench_full_autotune.cpp
+tests/bench_large_shapes.cpp
+tests/bench_onednn_vs_dnnopt.cpp
+tests/bench_tall_skinny_deep.cpp
+tests/bench_tile_padding.cpp
+tests/bench_tile_perf.cpp
+tests/bench_tile_selection.cpp
+tests/bench_very_large.cpp
