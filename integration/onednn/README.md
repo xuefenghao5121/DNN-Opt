@@ -81,6 +81,93 @@ cd /path/to/onednn_v3.7/scripts
 ./bench_compare_benchdnn.sh  # benchdnn matmul 测试
 ```
 
+## Using benchdnn with DNN-Opt
+
+benchdnn 是 oneDNN 内置的基准测试工具，可用于验证 DNN-Opt 性能。
+
+### 1. Build benchdnn
+
+```bash
+cd /path/to/onednn/build_patched
+make benchdnn -j$(nproc)
+
+# 验证 benchdnn 已编译
+ls -l tests/benchdnn/benchdnn
+```
+
+### 2. Set Environment
+
+```bash
+# 指定 libdnnl.so 路径
+export LD_LIBRARY_PATH=/path/to/onednn/build_patched/src:$LD_LIBRARY_PATH
+```
+
+### 3. Run MatMul/GEMM Tests
+
+```bash
+# 进入 build 目录
+cd /path/to/onednn/build_patched
+
+# 单个 shape 测试
+./tests/benchdnn/benchdnn matmul --batch 1,1024,4096:1024,4096
+
+# 批量测试
+./tests/benchdnn/benchdnn matmul --batch 1,2,4,8,16,32:1024:4096
+
+# Square matrix
+./tests/benchdnn/benchdnn matmul --batch 1024,1024,1024:1024,1024
+
+# 性能模式 (只测性能，跳过 correctness)
+./tests/benchdnn/benchdnn --mode=P matmul --batch 1,1024,4096:1024,4096
+
+# 详细输出
+./tests/benchdnn/benchdnn -v matmul --batch 1,1024,4096:1024,4096
+```
+
+### 4. Compare Baseline vs DNN-Opt
+
+```bash
+# Baseline (无 DNN-Opt)
+export LD_LIBRARY_PATH=/path/to/onednn/build_baseline/src:$LD_LIBRARY_PATH
+./tests/benchdnn/benchdnn --mode=P matmul --batch 1,1024,4096:1024,4096
+
+# DNN-Opt
+export LD_LIBRARY_PATH=/path/to/onednn/build_patched/src:$LD_LIBRARY_PATH
+./tests/benchdnn/benchdnn --mode=P matmul --batch 1,1024,4096:1024,4096
+```
+
+### 5. Verify DNN-Opt Integration
+
+```bash
+# 检查 libdnnl.so 是否包含 dnnopt symbols
+nm -D /path/to/onednn/build_patched/src/libdnnl.so.3 | grep dnnopt
+
+# 或者检查是否定义了 DNNL_USE_DNNOPT
+nm -D /path/to/onednn/build_patched/src/libdnnl.so.3 | grep DNNL_USE_DNNOPT
+```
+
+### 6. Common benchdnn Parameters
+
+| Parameter | Description | Example |
+|-----------|-------------|---------|
+| `--batch` | Shape specification | `--batch M,N,K:N,K` |
+| `--mode=P` | Performance mode only | Skip correctness check |
+| `--mode=C` | Correctness mode only | Only verify results |
+| `-v` | Verbose output | Show detailed info |
+| `--mb` | Mini-batch size | `--mb 1,4,8` |
+| `--tag` | Memory format | `--tag ab` |
+
+### 7. Expected Results
+
+**Baseline oneDNN (无 DNN-Opt)**:
+- 非 square matrix 会报 STATUS=2 错误
+- Square matrix (M=N=K) 性能正常
+
+**oneDNN + DNN-Opt**:
+- 所有 shape 正常执行
+- 小矩阵 (M<32) 性能显著提升
+- 大矩阵性能与 baseline 相当或略优
+
 ## v3.4 Integration
 
 oneDNN v3.4 has the same parameter swap pattern as v3.7:
