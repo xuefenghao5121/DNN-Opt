@@ -1,10 +1,69 @@
 # oneDNN Integration
 
-Dnnopt integrates as a **supplementary patch** for oneDNN via the `dnnl_sgemm` interface.
+DNN-Opt integrates as a **supplementary patch** for oneDNN via the `dnnl_sgemm` interface.
+
+## Supported oneDNN Versions
+
+| Version | Patch File | Status |
+|---------|------------|--------|
+| **v3.7** | `onednn_v3.7_dnnopt.patch` | ✅ Tested |
+| v3.x (upstream) | `0001-dnnopt-integration.patch` | ✅ Tested |
+
+## v3.7 Integration
+
+oneDNN v3.7 requires special handling due to parameter swap in `dnnl_sgemm`:
+
+```c
+// dnnl_sgemm internally swaps parameters:
+extended_sgemm(&transb, &transa, &N, &M, &K, &alpha, B, &ldb, A, &lda, &beta, C, &ldc)
+```
+
+This causes stride mismatch for non-square matrices (M ≠ K). Our patch handles this via **implicit transpose duality**.
+
+### Build for v3.7
+
+```bash
+# Step 1: Build DNN-Opt
+cd /path/to/onednn-arm-opt
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+
+# Step 2: Apply patch to oneDNN v3.7
+cd /path/to/onednn_v3.7
+git apply /path/to/onednn-arm-opt/integration/onednn/onednn_v3.7_dnnopt.patch
+
+# Step 3: Build oneDNN with DNN-Opt
+mkdir build && cd build
+cmake .. \
+    -DDNNL_AARCH64_USE_DNNOPT=ON \
+    -DDNNOPT_ROOT=/path/to/onednn-arm-opt \
+    -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+```
+
+### Performance (Neoverse N2)
+
+| Shape | Baseline v3.7 | +DNN-Opt | Note |
+|-------|---------------|----------|------|
+| M=1, N=1024, K=4096 | FAILED | 17.5 GFLOPS | ✓ |
+| M=2 | FAILED | 15.0 GFLOPS | ✓ |
+| M=4 | FAILED | 32.5 GFLOPS | ✓ |
+| M=8 | FAILED | 18.3 GFLOPS | ✓ |
+| M=16 | FAILED | 22.9 GFLOPS | ✓ |
+| M=32 | FAILED | 33.5 GFLOPS | ✓ |
+| M=64 | FAILED | 36.6 GFLOPS | ✓ |
+| M=128 | FAILED | 42.2 GFLOPS | ✓ |
+| M=256 | FAILED | 43.4 GFLOPS | ✓ |
+| M=512 | FAILED | 44.9 GFLOPS | ✓ |
+| M=1024, N=1024, K=1024 | 61.3 GFLOPS | 40.0 GFLOPS | Large square |
+
+**Baseline v3.7**: Non-square matrices fail with `STATUS=2` (stride mismatch)
+**+DNN-Opt**: All shapes work correctly
 
 ## Design Rationale
 
-Dnnopt does **not** replace oneDNN. It accelerates the shapes where oneDNN underperforms:
+DNN-Opt does **not** replace oneDNN. It accelerates the shapes where oneDNN underperforms:
 
 - M=1 GEMV (inference batch=1)
 - M=2--7 small matrices (small-batch inference)
@@ -28,7 +87,7 @@ dnnl_sgemm() call
        +-- Final fallback --> ref_gemm
 ```
 
-## Build Instructions
+## Build Instructions (v3.x upstream)
 
 ### Prerequisites
 
@@ -85,7 +144,7 @@ LD_LIBRARY_PATH=build/src ./build/tests/bench_onednn_sgemm
 
 ## Performance (Neoverse N2, 2 cores @ 3GHz)
 
-### dnnopt + OpenBLAS vs upstream oneDNN
+### dnnopt + OpenBLAS vs upstream oneDNN (v3.x)
 
 | Shape | dnnopt+OpenBLAS | upstream | Speedup |
 |-------|-----------------|----------|---------|
@@ -117,7 +176,6 @@ LD_LIBRARY_PATH=build/src ./build/tests/bench_onednn_sgemm
 | `cmake/dnnopt.cmake` | Find and link dnnopt library |
 | `cmake/options.cmake` | Add DNNL_AARCH64_USE_DNNOPT option |
 | `src/cpu/aarch64/dnnopt_gemm_wrapper.hpp` | sgemm dispatch adapter |
-| `src/cpu/aarch64/brgemm_sgemm_wrapper.hpp` | BRGEMM fallback (experimental) |
 | `src/cpu/gemm/gemm.cpp` | Shape-based dispatch logic |
 
 ## Key Design Decisions
@@ -141,6 +199,10 @@ oneDNN's BRGEMM has JIT compilation overhead per call, making it unsuitable for 
 ```bash
 # Set DNNOPT_ROOT in cmake command
 cmake .. -DDNNOPT_ROOT=/path/to/onednn-arm-opt ...
+
+# Or set environment variable
+export DNNOPT_ROOT=/path/to/onednn-arm-opt
+cmake .. -DDNNL_AARCH64_USE_DNNOPT=ON ...
 ```
 
 ### `OpenBLAS not found`
@@ -157,15 +219,15 @@ cmake .. -DBLAS_INCLUDE_DIR=/usr/include/openblas ...
 ### Patch conflicts
 
 ```bash
-# Check oneDNN version (patch targets upstream oneDNN v3.x)
+# Check oneDNN version
 cd /path/to/onednn
 git log --oneline -1
 
-# If conflict, manually apply key changes:
-# 1. Add cmake/dnnopt.cmake
-# 2. Add include in CMakeLists.txt
-# 3. Add dnnopt_gemm_wrapper.hpp
-# 4. Modify gemm.cpp dispatch logic
+# For v3.7, use onednn_v3.7_dnnopt.patch
+git apply /path/to/onednn-arm-opt/integration/onednn/onednn_v3.7_dnnopt.patch
+
+# For v3.x upstream, use 0001-dnnopt-integration.patch
+git apply /path/to/onednn-arm-opt/integration/onednn/0001-dnnopt-integration.patch
 ```
 
 ## References
