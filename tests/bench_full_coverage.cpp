@@ -1,13 +1,18 @@
 /*******************************************************************************
  * Full Coverage Benchmark: Small-M + Irregular N
- * 
+ *
  * Comprehensive coverage of oneDNN weakness domain:
  * - M = 1, 2, 3, 4, 5, 6, 7 (all small batch sizes)
  * - N = all prime numbers 11-127 + non-power-of-2 6-250
  * - K = various sizes
  ******************************************************************************/
 
+#ifdef DNNOPT_USE_ONEDNN
 #include <oneapi/dnnl/dnnl.h>
+#else
+#include <dnnopt/gemm/gemm.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <chrono>
@@ -23,40 +28,52 @@ void fill_random(float* data, size_t n) {
         data[i] = (float)((rand() % 2000) - 1000) / 1000.0f;
 }
 
+// Wrapper that works with both oneDNN and dnnopt
+inline int sgemm_wrapper(char transa, char transb, int M, int N, int K,
+        float alpha, const float* A, int lda, const float* B, int ldb,
+        float beta, float* C, int ldc) {
+#ifdef DNNOPT_USE_ONEDNN
+    return dnnl_sgemm(transa, transb, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+#else
+    dnnopt::gemm_fp32(M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    return 0;  // success
+#endif
+}
+
 double bench_sgemm(int M, int N, int K, int warmup=5, int runs=30) {
     size_t a_sz = (size_t)M * K;
     size_t b_sz = (size_t)K * N;
     size_t c_sz = (size_t)M * N;
-    
+
     if (a_sz == 0 || b_sz == 0 || c_sz == 0) return 0;
-    
+
     float* A = (float*)aligned_alloc(64, a_sz * sizeof(float));
     float* B = (float*)aligned_alloc(64, b_sz * sizeof(float));
     float* C = (float*)aligned_alloc(64, c_sz * sizeof(float));
-    
+
     fill_random(A, a_sz);
     fill_random(B, b_sz);
-    
+
     float alpha = 1.0f, beta = 0.0f;
-    
+
     // Warmup
     for (int w = 0; w < warmup; w++)
-        dnnl_sgemm('N', 'N', M, N, K, alpha, A, K, B, N, beta, C, N);
-    
+        sgemm_wrapper('N', 'N', M, N, K, alpha, A, K, B, N, beta, C, N);
+
     // Benchmark
     std::vector<double> times;
     for (int i = 0; i < runs; i++) {
         auto t0 = std::chrono::high_resolution_clock::now();
-        dnnl_sgemm('N', 'N', M, N, K, alpha, A, K, B, N, beta, C, N);
+        sgemm_wrapper('N', 'N', M, N, K, alpha, A, K, B, N, beta, C, N);
         auto t1 = std::chrono::high_resolution_clock::now();
         times.push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
     }
     std::sort(times.begin(), times.end());
-    
+
     free(A);
     free(B);
     free(C);
-    
+
     return times[runs/2];  // median
 }
 
