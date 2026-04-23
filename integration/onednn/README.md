@@ -7,6 +7,7 @@ DNN-Opt integrates as a **supplementary patch** for oneDNN via the `dnnl_sgemm` 
 | Version | Patch File | Status |
 |---------|------------|--------|
 | **v3.7** | `onednn_v3.7_dnnopt.patch` | ✅ Tested |
+| **v3.4** | `onednn_v3.4_dnnopt.patch` | ✅ Tested |
 | v3.x (upstream) | `0001-dnnopt-integration.patch` | ✅ Tested |
 
 ## v3.7 Integration
@@ -79,6 +80,57 @@ cd /path/to/onednn_v3.7/scripts
 ./bench_compare_direct.sh    # 直接 dnnl_sgemm 对比 (推荐)
 ./bench_compare_benchdnn.sh  # benchdnn matmul 测试
 ```
+
+## v3.4 Integration
+
+oneDNN v3.4 has the same parameter swap pattern as v3.7:
+
+```c
+// In src/common/gemm.cpp: same parameter swap
+extended_sgemm(&transb, &transa, &N, &M, &K, &alpha, B, &ldb, A, &lda, &beta, C, &ldc)
+```
+
+### Build for v3.4
+
+```bash
+# Step 1: Apply patch to oneDNN v3.4
+cd /path/to/onednn_v3.4
+git apply /path/to/onednn-arm-opt/integration/onednn/onednn_v3.4_dnnopt.patch
+
+# Step 2: Build oneDNN with DNN-Opt (must use Clang-15)
+mkdir build_patched && cd build_patched
+cmake .. \
+    -DCMAKE_CXX_COMPILER=clang++-15 \
+    -DDNNL_AARCH64_USE_DNNOPT=ON \
+    -DDNNOPT_ROOT=/path/to/onednn-arm-opt \
+    -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc) dnnl
+```
+
+### Performance (Neoverse N2)
+
+**测试日期**: 2026-04-23
+
+| Shape | Baseline v3.4 | +DNN-Opt | Status |
+|-------|---------------|----------|--------|
+| M=1, N=1024, K=4096 | FAILED | 15.03 GFLOPS | **FIXED** |
+| M=2 | FAILED | 13.33 GFLOPS | **FIXED** |
+| M=4 | FAILED | 31.50 GFLOPS | **FIXED** |
+| M=8 | FAILED | 16.69 GFLOPS | **FIXED** |
+| M=16 | FAILED | 19.89 GFLOPS | **FIXED** |
+| M=32 | FAILED | 24.76 GFLOPS | **FIXED** |
+| M=64 | FAILED | 33.27 GFLOPS | **FIXED** |
+| M=128 | FAILED | 41.44 GFLOPS | **FIXED** |
+| M=256 | FAILED | 42.52 GFLOPS | **FIXED** |
+| M=512 | FAILED | 44.64 GFLOPS | **FIXED** |
+| M=1024, N=1024, K=1024 | 16.59 GFLOPS | 45.08 GFLOPS | **+171%** |
+| M=3 (prime) | FAILED | 16.93 GFLOPS | **FIXED** |
+| M=5 (prime) | FAILED | 13.95 GFLOPS | **FIXED** |
+| M=7 (prime) | FAILED | 13.28 GFLOPS | **FIXED** |
+| M=11 (prime) | FAILED | 23.90 GFLOPS | **FIXED** |
+
+**Baseline v3.4**: 14/15 shapes FAILED (STATUS=2 stride mismatch)
+**+DNN-Opt**: 15/15 shapes OK
 
 ## Design Rationale
 

@@ -1,0 +1,82 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index e9bcdb2..9cd9227 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -124,6 +124,7 @@ include("cmake/platform.cmake")
+ include("cmake/SDL.cmake")
+ include("cmake/ACL.cmake")
+ include("cmake/blas.cmake")
++include("cmake/dnnopt.cmake")
+ include("cmake/doc.cmake")
+ include("cmake/version.cmake")
+ include("cmake/coverage.cmake")
+diff --git a/cmake/options.cmake b/cmake/options.cmake
+index 73e4391..564857d 100644
+--- a/cmake/options.cmake
++++ b/cmake/options.cmake
+@@ -383,3 +383,12 @@ option(DNNL_AARCH64_USE_ACL "Enables use of AArch64 optimised functions
+     This is only supported on AArch64 builds and assumes there is a
+     functioning Compute Library build available at the location specified by the
+     environment variable ACL_ROOT_DIR." OFF)
++
++# ==================================
++# AArch64 optimizations with DNN-Opt
++# ==================================
++
++option(DNNL_AARCH64_USE_DNNOPT "Enables use of DNN-Opt optimized GEMM kernels
++    for AArch64. This provides hardware-adaptive NEON/SVE/BF16/INT8 microkernels
++    optimized for small and irregular matrix shapes.
++    Set DNNOPT_ROOT to the DNN-Opt source directory." OFF)
+diff --git a/src/cpu/gemm/gemm.cpp b/src/cpu/gemm/gemm.cpp
+index 58f8fa7..59a77ba 100644
+--- a/src/cpu/gemm/gemm.cpp
++++ b/src/cpu/gemm/gemm.cpp
+@@ -49,6 +49,10 @@ using namespace dnnl::impl::cpu::ppc64;
+ #include "cpu/s390x/gemm.h"
+ #endif
+ 
++#if DNNL_AARCH64 && defined(DNNL_USE_DNNOPT)
++#include "cpu/aarch64/dnnopt_gemm_wrapper.hpp"
++#endif
++
+ namespace dnnl {
+ namespace impl {
+ namespace cpu {
+@@ -108,6 +112,37 @@ dnnl_status_t extended_sgemm(const char *transa, const char *transb,
+         const float *A, const dim_t *lda, const float *B, const dim_t *ldb,
+         const float *beta, float *C, const dim_t *ldc, const float *bias,
+         const bool force_jit_nocopy_gemm) {
++
++#if DNNL_AARCH64 && defined(DNNL_USE_DNNOPT)
++    // DNN-Opt handles all shapes because dnnl_sgemm's parameter swap causes
++    // stride mismatch for any M != K. We dispatch BEFORE stride check.
++    //
++    // After dnnl_sgemm parameter swap:
++    //   M' = N_user, N' = M_user, K' = K_user
++    //   A' = B_user (ldb'), B' = A_user (lda')
++    // Stride check: lda' >= M' (ldb_user >= N_user), ldb' >= K' (lda_user >= K)
++    // This fails when lda_user < K (common case for M_user < K)
++    //
++    // DNN-Opt handles these stride mismatches via implicit transpose duality.
++    bool use_dnnopt = true;  // Always use dnnopt for aarch64
++
++    // Basic validation for dnnopt
++    bool valid_shape = (*M >= 0 && *N >= 0 && *K >= 0)
++            && utils::one_of(*transa, 'N', 'n', 'T', 't')
++            && utils::one_of(*transb, 'N', 'n', 'T', 't')
++            && !utils::one_of(*transa, 'P', 'p')
++            && !utils::one_of(*transb, 'P', 'p');
++
++    if (use_dnnopt && valid_shape) {
++        auto status = aarch64::dnnopt_sgemm(transa, transb, M, N, K, alpha,
++                A, lda, B, ldb, beta, C, ldc, bias);
++        if (status != status::unimplemented) {
++            msan_unpoison_matrix(C, *M, *N, *ldc, sizeof(*C));
++            return status;
++        }
++    }
++#endif
++
+     dnnl_status_t status = check_gemm_input(transa, transb, M, N, K, A, lda, B,
+             ldb, C, ldc, alpha, beta, bias != nullptr);
+     if (status != dnnl_success) return status;
