@@ -22,44 +22,63 @@ This causes stride mismatch for non-square matrices (M ≠ K). Our patch handles
 
 ### Build for v3.7
 
+**重要**: DNN-Opt 和 oneDNN 必须使用相同的编译器 (Clang-15) 以保证 ABI 兼容。
+
 ```bash
-# Step 1: Build DNN-Opt
+# Step 1: Build DNN-Opt with Clang-15
 cd /path/to/onednn-arm-opt
 mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake .. -DCMAKE_CXX_COMPILER=clang++-15 -DCMAKE_BUILD_TYPE=Release
 make -j$(nproc)
 
 # Step 2: Apply patch to oneDNN v3.7
 cd /path/to/onednn_v3.7
 git apply /path/to/onednn-arm-opt/integration/onednn/onednn_v3.7_dnnopt.patch
 
-# Step 3: Build oneDNN with DNN-Opt
+# Step 3: Build oneDNN with DNN-Opt (must use Clang-15)
 mkdir build && cd build
 cmake .. \
+    -DCMAKE_CXX_COMPILER=clang++-15 \
     -DDNNL_AARCH64_USE_DNNOPT=ON \
     -DDNNOPT_ROOT=/path/to/onednn-arm-opt \
     -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
+make -j$(nproc) dnnl
 ```
 
 ### Performance (Neoverse N2)
 
-| Shape | Baseline v3.7 | +DNN-Opt | Note |
-|-------|---------------|----------|------|
-| M=1, N=1024, K=4096 | FAILED | 17.5 GFLOPS | ✓ |
-| M=2 | FAILED | 15.0 GFLOPS | ✓ |
-| M=4 | FAILED | 32.5 GFLOPS | ✓ |
-| M=8 | FAILED | 18.3 GFLOPS | ✓ |
-| M=16 | FAILED | 22.9 GFLOPS | ✓ |
-| M=32 | FAILED | 33.5 GFLOPS | ✓ |
-| M=64 | FAILED | 36.6 GFLOPS | ✓ |
-| M=128 | FAILED | 42.2 GFLOPS | ✓ |
-| M=256 | FAILED | 43.4 GFLOPS | ✓ |
-| M=512 | FAILED | 44.9 GFLOPS | ✓ |
-| M=1024, N=1024, K=1024 | 61.3 GFLOPS | 40.0 GFLOPS | Large square |
+**测试日期**: 2026-04-23
 
-**Baseline v3.7**: Non-square matrices fail with `STATUS=2` (stride mismatch)
-**+DNN-Opt**: All shapes work correctly
+| Shape | Baseline v3.7 | +DNN-Opt | Status |
+|-------|---------------|----------|--------|
+| M=1, N=1024, K=4096 | FAILED | 16.88 GFLOPS | **FIXED** |
+| M=2 | FAILED | 14.74 GFLOPS | **FIXED** |
+| M=4 | FAILED | 31.79 GFLOPS | **FIXED** |
+| M=8 | FAILED | 17.76 GFLOPS | **FIXED** |
+| M=16 | FAILED | 22.33 GFLOPS | **FIXED** |
+| M=32 | FAILED | 32.78 GFLOPS | **FIXED** |
+| M=64 | FAILED | 36.08 GFLOPS | **FIXED** |
+| M=128 | FAILED | 41.25 GFLOPS | **FIXED** |
+| M=256 | FAILED | 42.64 GFLOPS | **FIXED** |
+| M=512 | FAILED | 44.63 GFLOPS | **FIXED** |
+| M=1024, N=1024, K=1024 | 41.87 GFLOPS | 44.97 GFLOPS | +7% |
+| M=3 (prime) | FAILED | 16.92 GFLOPS | **FIXED** |
+| M=5 (prime) | FAILED | 13.98 GFLOPS | **FIXED** |
+| M=7 (prime) | FAILED | 13.87 GFLOPS | **FIXED** |
+| M=11 (prime) | FAILED | 24.23 GFLOPS | **FIXED** |
+
+**Baseline v3.7**: 14/15 shapes FAILED (STATUS=2 stride mismatch)
+**+DNN-Opt**: 15/15 shapes OK
+
+### Benchmark Scripts
+
+测试脚本位于 oneDNN v3.7 的 `scripts/` 目录：
+
+```bash
+cd /path/to/onednn_v3.7/scripts
+./bench_compare_direct.sh    # 直接 dnnl_sgemm 对比 (推荐)
+./bench_compare_benchdnn.sh  # benchdnn matmul 测试
+```
 
 ## Design Rationale
 
