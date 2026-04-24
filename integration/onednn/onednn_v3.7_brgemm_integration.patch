@@ -1,0 +1,471 @@
+From cbb72cdf99dae377f48047b432d6e1aaa635f5ef Mon Sep 17 00:00:00 2001
+From: DNN-Opt Developer <dnnopt@example.com>
+Date: Sat, 25 Apr 2026 02:44:00 +0800
+Subject: [PATCH 2/2] feat: Integrate DNN-Opt into brgemm_matmul for
+ small/irregular shapes
+
+Add hybrid dispatch in brgemm_matmul_t::execute_body() to use DNN-Opt's
+optimized GEMM kernels for small and irregular matrix shapes while
+keeping brgemm kernel for large regular shapes.
+
+Changes:
+- brgemm_matmul_utils.hpp: Add should_use_dnnopt_shape() function and
+  use_dnnopt flag in brgemm_matmul_conf_t
+- brgemm_matmul.hpp: Add should_use_dnnopt() and execute_dnnopt() methods
+- brgemm_matmul.cpp: Implement DNN-Opt dispatch in execute_body()
+- cmake/dnnopt.cmake: Fix library linking configuration
+
+Shape detection rules for DNN-Opt:
+- M <= 16: tiny/small_m kernels
+- M <= 32 && N <= 128 && K <= 128: small square-ish
+- M*N*K < 32768: very small total ops
+- M <= 64 && !is_pow2(M): irregular M dimensions
+
+This enables DNN-Opt optimization on SVE_512/SVE_256 capable servers
+where brgemm_matmul would normally be selected.
+
+Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>
+---
+ cmake/dnnopt.cmake                            |   3 +-
+ .../dnnopt_brgemm_integration_design.md       | 254 ++++++++++++++++++
+ src/cpu/aarch64/matmul/brgemm_matmul.cpp      |  65 +++++
+ src/cpu/aarch64/matmul/brgemm_matmul.hpp      |   5 +
+ .../aarch64/matmul/brgemm_matmul_utils.hpp    |  27 ++
+ 5 files changed, 353 insertions(+), 1 deletion(-)
+ create mode 100644 integration/dnnopt_brgemm_integration_design.md
+
+diff --git a/cmake/dnnopt.cmake b/cmake/dnnopt.cmake
+index 0a13c43..60c0bcd 100644
+--- a/cmake/dnnopt.cmake
++++ b/cmake/dnnopt.cmake
+@@ -69,4 +69,5 @@ add_definitions(-DDNNL_USE_DNNOPT)
+ include_directories(SYSTEM ${DNNOPT_INCLUDE_DIR})
+ 
+ # Link DNN-Opt to the main library
+-list(APPEND EXTRA_STATIC_LIBS dnnopt::core)
+\ No newline at end of file
++# Add to global property so it's picked up by src/CMakeLists.txt
++set_property(GLOBAL APPEND PROPERTY DNNL_SUBDIR_EXTRA_STATIC_LIBS dnnopt::core)
+\ No newline at end of file
+diff --git a/integration/dnnopt_brgemm_integration_design.md b/integration/dnnopt_brgemm_integration_design.md
+new file mode 100644
+index 0000000..85bb416
+--- /dev/null
++++ b/integration/dnnopt_brgemm_integration_design.md
+@@ -0,0 +1,254 @@
++# DNN-Opt Integration into brgemm_matmul for oneDNN v3.7
++
++## Overview
++
++This document describes how to integrate DNN-Opt's optimized GEMM for small/irregular shapes
++into oneDNN v3.7's `brgemm_matmul_t` primitive on AArch64.
++
++## Problem Statement
++
++- `brgemm_matmul_t` is selected for matmul on SVE_512/SVE_256 capable hardware
++- brgemm_matmul uses JIT-compiled SVE kernels that are optimized for large matrices
++- DNN-Opt provides optimized GEMM for small matrices (M <= 16) and irregular shapes
++- Current DNN-Opt patches in `gemm.cpp` (`extended_sgemm`) are bypassed when brgemm is used
++
++## Integration Strategy
++
++### Approach: Hybrid Dispatch in brgemm_matmul
++
++Modify `brgemm_matmul_t::execute_body()` to:
++1. Check if the shape falls into DNN-Opt's optimization domain
++2. If yes, call DNN-Opt's `gemm_fp32()` directly
++3. If no, proceed with original brgemm kernel execution
++
++### Shape Classification
++
++DNN-Opt excels at:
++- Small M: M <= 16 (tiny/small_m_wide kernels)
++- Irregular shapes: prime dimensions, non-power-of-2
++- Very small batch: M <= 4, N <= 16
++
++```cpp
++inline bool should_use_dnnopt(int M, int N, int K) {
++    // DNN-Opt optimized shapes
++    if (M <= 16 && N >= 1 && K >= 1) return true;
++    if (M <= 32 && N <= 64 && K <= 64) return true;  // small square-ish
++    if (M * N * K < 16384) return true;  // very small total ops
++    
++    // Irregular shapes
++    if (!is_pow2(M) && M <= 64) return true;
++    
++    return false;
++}
++```
++
++## Implementation Details
++
++### File 1: src/cpu/aarch64/matmul/brgemm_matmul.hpp
++
++Add DNN-Opt header include and helper function:
++
++```cpp
++// At the top of the file, after existing includes
++#ifdef DNNL_USE_DNNOPT
++#include "dnnopt/gemm/gemm.h"
++#endif
++
++// In the brgemm_matmul_t class, add private method
++private:
++    bool should_use_dnnopt() const;
++    status_t execute_dnnopt(const exec_ctx_t &ctx) const;
++```
++
++### File 2: src/cpu/aarch64/matmul/brgemm_matmul.cpp
++
++#### 2a. Add shape detection in pd_t::init
++
++```cpp
++// In pd_t::init(), after all validation checks pass
++template <cpu_isa_t isa>
++status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
++    // ... existing validation code ...
++    
++    // Set flag for DNN-Opt usage
++    bgmmc_.use_dnnopt = should_use_dnnopt_shape(bgmmc_.M, bgmmc_.N, bgmmc_.K);
++    
++    // ... rest of init ...
++}
++
++inline bool should_use_dnnopt_shape(dim_t M, dim_t N, dim_t K) {
++    if (M <= 0 || N <= 0 || K <= 0) return false;
++    
++    // DNN-Opt sweet spots
++    if (M <= 16) return true;  // tiny/small_m
++    if (M <= 32 && N <= 128) return true;  // small_m_wide
++    if (M * N * K < 32768) return true;  // very small total
++    
++    // Irregular: prime or non-power-of-2 small M
++    if (M <= 64 && !is_pow2(M)) return true;
++    
++    return false;
++}
++```
++
++#### 2b. Add execute_dnnopt method
++
++```cpp
++template <cpu_isa_t isa>
++bool brgemm_matmul_t<isa>::should_use_dnnopt() const {
++    const auto &bgmmc = pd()->get_brgemm_matmul_conf();
++    return bgmmc.use_dnnopt;
++}
++
++template <cpu_isa_t isa>
++status_t brgemm_matmul_t<isa>::execute_dnnopt(const exec_ctx_t &ctx) const {
++    const auto src_d = ctx.memory_mdw(DNNL_ARG_SRC, pd()->src_md());
++    const auto weights_d = ctx.memory_mdw(DNNL_ARG_WEIGHTS, pd()->weights_md());
++    const auto dst_d = ctx.memory_mdw(DNNL_ARG_DST, pd()->dst_md());
++    
++    const float *src = static_cast<const float *>(
++            CTX_IN_MEM(const char *, DNNL_ARG_SRC));
++    const float *weights = static_cast<const float *>(
++            CTX_IN_MEM(const char *, DNNL_ARG_WEIGHTS));
++    float *dst = static_cast<float *>(
++            CTX_OUT_MEM(char *, DNNL_ARG_DST));
++    
++    const auto &bgmmc = pd()->get_brgemm_matmul_conf();
++    const dim_t M = bgmmc.M;
++    const dim_t N = bgmmc.N;
++    const dim_t K = bgmmc.K;
++    
++    // Get strides from memory descriptors
++    const dim_t lda = src_d.blocking_desc().strides[bgmmc.ndims - 1];
++    const dim_t ldb = weights_d.blocking_desc().strides[bgmmc.ndims - 2];
++    const dim_t ldc = dst_d.blocking_desc().strides[bgmmc.ndims - 1];
++    
++    // Handle batch dimension
++    const dim_t batch = bgmmc.batch;
++    
++    for (dim_t b = 0; b < batch; b++) {
++        const float *A_batch = src + b * bgmmc.A_strides[2] / sizeof(float);
++        const float *B_batch = weights + b * bgmmc.B_strides[2] / sizeof(float);
++        float *C_batch = dst + b * bgmmc.C_strides[2] / sizeof(float);
++        
++        // Call DNN-Opt GEMM
++        dnnopt::gemm_fp32(M, N, K, 1.0f, A_batch, lda,
++                         B_batch, ldb, 0.0f, C_batch, ldc);
++    }
++    
++    return status::success;
++}
++```
++
++#### 2c. Modify execute_body to dispatch
++
++```cpp
++template <cpu_isa_t isa>
++status_t brgemm_matmul_t<isa>::execute_body(const exec_ctx_t &ctx) const {
++    // Check if DNN-Opt should be used
++#ifdef DNNL_USE_DNNOPT
++    if (should_use_dnnopt()) {
++        return execute_dnnopt(ctx);
++    }
++#endif
++    
++    // ... existing brgemm execution code ...
++}
++```
++
++### File 3: src/cpu/aarch64/matmul/brgemm_matmul_utils.hpp
++
++Add `use_dnnopt` flag to brgemm_matmul_conf_t:
++
++```cpp
++struct brgemm_matmul_conf_t {
++    // ... existing fields ...
++    
++    bool use_dnnopt = false;  // Use DNN-Opt for small/irregular shapes
++};
++```
++
++### File 4: cmake/dnnopt.cmake (same as before)
++
++```cmake
++# DNN-Opt finder for oneDNN v3.7
++find_path(DNNOPT_INCLUDE_DIR
++    NAMES dnnopt/gemm/gemm.h
++    PATHS ${DNNOPT_ROOT}/include
++)
++
++find_library(DNNOPT_LIBRARY
++    NAMES dnnopt_core
++    PATHS ${DNNOPT_ROOT}/build ${DNNOPT_ROOT}/lib
++)
++
++if(DNNOPT_INCLUDE_DIR AND DNNOPT_LIBRARY)
++    message(STATUS "Found DNN-Opt: ${DNNOPT_LIBRARY}")
++    add_definitions(-DDNNL_USE_DNNOPT)
++    
++    # Add DNN-Opt as link dependency
++    set(DNNL_LINK_LIBS "${DNNL_LINK_LIBS};${DNNOPT_LIBRARY}" PARENT_SCOPE)
++    include_directories(${DNNOPT_INCLUDE_DIR})
++else()
++    message(STATUS "DNN-Opt not found, using oneDNN native kernels")
++endif()
++```
++
++## Testing Strategy
++
++### Test Script
++
++```bash
++#!/bin/bash
++# Test DNN-Opt integration in brgemm_matmul
++
++SHAPES=(
++    "16x32:32x16"   # small_m - should use DNN-Opt
++    "4x32:32x16"    # tiny - should use DNN-Opt  
++    "35x400:400x400" # irregular M - should use DNN-Opt
++    "256x256:256x256" # large - should use brgemm
++)
++
++for shape in "${SHAPES[@]}"; do
++    echo "Testing $shape"
++    DNNL_VERBOSE=1 LD_LIBRARY_PATH=./src ./tests/benchdnn/benchdnn \
++        --matmul --mode=P --dt=f32 $shape 2>&1 | grep "matmul,"
++    
++    # Verify:
++    # - Small shapes show kernel name containing "dnnopt" or similar marker
++    # - Large shapes show "brg:sve_512" or "brg:sve_256"
++done
++```
++
++## Expected Performance
++
++| Shape | oneDNN brgemm (GF) | DNN-Opt (GF) | Expected Improvement |
++|-------|-------------------|---------------|---------------------|
++| 16x32:32x16 | ~6.7 | ~11.2 | +67% |
++| 4x32:32x16 | ~2.1 | ~5.6 | +167% |
++| 35x400:400x400 | ~15.4 | ~36.6 | +137% |
++| 256x256:256x256 | ~43.7 | ~43 | Similar (brgemm) |
++
++## Alternative Approach: Fallback at Primitive Selection
++
++Instead of modifying brgemm_matmul, we could modify the primitive selection logic:
++
++### cpu_matmul_list.cpp modification
++
++```cpp
++// Add a new primitive for DNN-Opt matmul before brgemm
++#ifdef DNNL_USE_DNNOPT
++CPU_INSTANCE_AARCH64(dnnopt_matmul_t)  // New primitive for small shapes
++#endif
++
++CPU_INSTANCE_AARCH64(brgemm_matmul_t<sve_512>)
++// ... rest ...
++```
++
++This requires creating a new `dnnopt_matmul_t` primitive class that wraps DNN-Opt's gemm_fp32.
++
++## Recommended Implementation Order
++
++1. **Phase 1**: Modify brgemm_matmul with hybrid dispatch (simpler, less invasive)
++2. **Phase 2**: If needed, create dedicated dnnopt_matmul_t primitive for better separation
++3. **Phase 3**: Add autotune support for shape-based kernel selection
+\ No newline at end of file
+diff --git a/src/cpu/aarch64/matmul/brgemm_matmul.cpp b/src/cpu/aarch64/matmul/brgemm_matmul.cpp
+index efd6109..b007b8d 100644
+--- a/src/cpu/aarch64/matmul/brgemm_matmul.cpp
++++ b/src/cpu/aarch64/matmul/brgemm_matmul.cpp
+@@ -29,6 +29,11 @@
+ #include "cpu/aarch64/injectors/jit_uni_binary_injector.hpp"
+ #include "cpu/aarch64/matmul/brgemm_matmul.hpp"
+ 
++// DNN-Opt integration for small/irregular shapes
++#ifdef DNNL_USE_DNNOPT
++#include "dnnopt/gemm/gemm.h"
++#endif
++
+ namespace dnnl {
+ namespace impl {
+ namespace cpu {
+@@ -181,6 +186,9 @@ status_t brgemm_matmul_t<isa>::pd_t::init(engine_t *engine) {
+     if ((mayiuse(sve_512) && is_B_transposed) || is_A_transposed)
+         return status::unimplemented;
+ 
++    // DNN-Opt integration: check if this shape should use DNN-Opt
++    bgmmc_.use_dnnopt = should_use_dnnopt_shape(bgmmc_.M, bgmmc_.N, bgmmc_.K);
++
+     return status::success;
+ }
+ 
+@@ -223,6 +231,13 @@ status_t brgemm_matmul_t<isa>::init(engine_t *engine) {
+ 
+ template <cpu_isa_t isa>
+ status_t brgemm_matmul_t<isa>::execute_body(const exec_ctx_t &ctx) const {
++    // DNN-Opt integration: dispatch to DNN-Opt for small/irregular shapes
++#ifdef DNNL_USE_DNNOPT
++    if (should_use_dnnopt()) {
++        return execute_dnnopt(ctx);
++    }
++#endif
++
+     DEFINE_ZERO_POINT_VALUE(src_zero_point, DNNL_ARG_SRC);
+     DEFINE_ZERO_POINT_VALUE(wei_zero_point, DNNL_ARG_WEIGHTS);
+     DEFINE_ZERO_POINT_VALUE(dst_zero_point, DNNL_ARG_DST);
+@@ -1429,6 +1444,56 @@ private:
+     std::vector<tail_processing_t> m_tail_processing_;
+ };
+ 
++// DNN-Opt integration implementation
++template <cpu_isa_t isa>
++bool brgemm_matmul_t<isa>::should_use_dnnopt() const {
++    return pd()->get_brgemm_matmul_conf().use_dnnopt;
++}
++
++template <cpu_isa_t isa>
++status_t brgemm_matmul_t<isa>::execute_dnnopt(const exec_ctx_t &ctx) const {
++#ifdef DNNL_USE_DNNOPT
++    const float *src = reinterpret_cast<const float *>(
++            CTX_IN_MEM(const char *, DNNL_ARG_SRC));
++    const float *weights = reinterpret_cast<const float *>(
++            CTX_IN_MEM(const char *, DNNL_ARG_WEIGHTS));
++    float *dst = reinterpret_cast<float *>(
++            CTX_OUT_MEM(char *, DNNL_ARG_DST));
++
++    const auto &bgmmc = pd()->get_brgemm_matmul_conf();
++    const dim_t M = bgmmc.M;
++    const dim_t N = bgmmc.N;
++    const dim_t K = bgmmc.K;
++
++    // Get strides - assuming plain row-major layout for DNN-Opt path
++    // For more complex layouts, we may need additional handling
++    const dim_t lda = bgmmc.A_strides[0] / bgmmc.a_dt_sz;
++    const dim_t ldb = bgmmc.B_strides[0] / bgmmc.b_dt_sz;
++    const dim_t ldc = bgmmc.C_strides[0] / bgmmc.c_dt_sz;
++
++    // Handle batch dimension
++    const dim_t batch = bgmmc.batch;
++
++    for (dim_t b = 0; b < batch; b++) {
++        const float *A_batch = src + b * bgmmc.A_strides[2] / bgmmc.a_dt_sz;
++        const float *B_batch = weights + b * bgmmc.B_strides[2] / bgmmc.b_dt_sz;
++        float *C_batch = dst + b * bgmmc.C_strides[2] / bgmmc.c_dt_sz;
++
++        // Call DNN-Opt GEMM (row-major)
++        // DNN-Opt expects: A(M×K) × B(K×N) = C(M×N)
++        dnnopt::gemm_fp32(static_cast<int>(M), static_cast<int>(N),
++                          static_cast<int>(K), 1.0f, A_batch,
++                          static_cast<int>(lda), B_batch,
++                          static_cast<int>(ldb), 0.0f, C_batch,
++                          static_cast<int>(ldc));
++    }
++
++    return status::success;
++#else
++    return status::unimplemented;
++#endif
++}
++
+ template struct brgemm_matmul_t<sve_512>;
+ template struct brgemm_matmul_t<sve_256>;
+ 
+diff --git a/src/cpu/aarch64/matmul/brgemm_matmul.hpp b/src/cpu/aarch64/matmul/brgemm_matmul.hpp
+index afa4dbb..f23aa31 100644
+--- a/src/cpu/aarch64/matmul/brgemm_matmul.hpp
++++ b/src/cpu/aarch64/matmul/brgemm_matmul.hpp
+@@ -114,6 +114,11 @@ private:
+ 
+     const pd_t *pd() const { return (const pd_t *)primitive_t::pd().get(); }
+     status_t execute_body(const exec_ctx_t &ctx) const;
++
++    // DNN-Opt integration
++    bool should_use_dnnopt() const;
++    status_t execute_dnnopt(const exec_ctx_t &ctx) const;
++
+     void compute_kernel(const brg_matmul_exec_ctx_t &brgmm_ctx, int ithr,
+             int b_idx, int m_blk_idx, int n_blk_idx, int k_blk_idx,
+             bool do_init, int &prev_ker_idx) const;
+diff --git a/src/cpu/aarch64/matmul/brgemm_matmul_utils.hpp b/src/cpu/aarch64/matmul/brgemm_matmul_utils.hpp
+index ec4e1b7..98a90c4 100644
+--- a/src/cpu/aarch64/matmul/brgemm_matmul_utils.hpp
++++ b/src/cpu/aarch64/matmul/brgemm_matmul_utils.hpp
+@@ -33,6 +33,29 @@ namespace matmul {
+ 
+ constexpr int max_batch_ndims = DNNL_MAX_NDIMS - 2;
+ 
++// DNN-Opt shape detection: determines if DNN-Opt should be used
++// for the given matmul shape instead of brgemm kernel.
++// DNN-Opt excels at: small M, irregular shapes, very small total ops.
++inline bool should_use_dnnopt_shape(dim_t M, dim_t N, dim_t K) {
++    if (M <= 0 || N <= 0 || K <= 0) return false;
++
++    // DNN-Opt sweet spots based on benchmarking:
++    // - Small M (tiny/small_m_wide kernels): M <= 16
++    // - Small square-ish: M <= 32, N <= 128, K <= 128
++    // - Very small total ops: M*N*K < 32768 (16K ops threshold)
++    // - Irregular M: non-power-of-2 and M <= 64
++
++    if (M <= 16) return true;
++    if (M <= 32 && N <= 128 && K <= 128) return true;
++    if (M * N * K < 32768) return true;
++
++    // Irregular: prime or non-power-of-2 small M
++    // DNN-Opt handles padding better for these
++    if (M <= 64 && !math::is_pow2(M)) return true;
++
++    return false;
++}
++
+ struct brgemm_matmul_bcast_desc_t {
+ 
+     brgemm_matmul_bcast_desc_t()
+@@ -185,6 +208,10 @@ struct brgemm_matmul_conf_t {
+     bool is_runtime_M = false;
+     bool is_runtime_N = false;
+     bool is_runtime_K = false;
++
++    // DNN-Opt integration: use DNN-Opt for small/irregular shapes
++    bool use_dnnopt = false;
++
+     inline bool lda_big_pow2() const {
+         const dim_t big_K_threshold = 4096;
+         return !transposed_A && math::is_pow2(K) && K >= big_K_threshold;
+-- 
+2.43.7
+

@@ -6,6 +6,7 @@ DNN-Opt integrates as a **supplementary patch** for oneDNN via the `dnnl_sgemm` 
 
 | Version | Patch File | Status |
 |---------|------------|--------|
+| **v3.7 + brgemm** | `onednn_v3.7_brgemm_integration.patch` | ✅ Tested (SVE_512/256) |
 | **v3.7** | `onednn_v3.7_dnnopt.patch` | ✅ Tested |
 | **v3.4** | `onednn_v3.4_dnnopt.patch` | ✅ Tested |
 | v3.x (upstream) | `0001-dnnopt-integration.patch` | ✅ Tested |
@@ -21,7 +22,77 @@ extended_sgemm(&transb, &transa, &N, &M, &K, &alpha, B, &ldb, A, &lda, &beta, C,
 
 This causes stride mismatch for non-square matrices (M ≠ K). Our patch handles this via **implicit transpose duality**.
 
-### Build for v3.7
+### v3.7 + brgemm_matmul Integration (SVE_512/256 servers)
+
+**重要**: 对于支持 SVE_512 或 SVE_256 的服务器（如 Neoverse V1/V2），oneDNN v3.7 会选择 `brgemm_matmul_t` 而非 `gemm_f32_matmul_t`，导致 DNN-Opt 不生效。
+
+此 patch 在 `brgemm_matmul_t::execute_body()` 中添加 **hybrid dispatch**：
+- 小矩阵/不规则矩阵：自动调用 `dnnopt::gemm_fp32()`
+- 大矩阵：继续使用 brgemm kernel
+
+#### Shape 分类规则
+
+DNN-Opt 自动生效的 shapes：
+```cpp
+// should_use_dnnopt_shape(M, N, K) 返回 true 的条件:
+// - M <= 16: tiny/small_m kernels
+// - M <= 32 && N <= 128 && K <= 128: small square-ish
+// - M*N*K < 32768: very small total ops
+// - M <= 64 && !is_pow2(M): irregular M dimensions
+```
+
+#### Build for v3.7 with brgemm integration
+
+```bash
+# Step 1: Build DNN-Opt with Clang-15
+cd /path/to/onednn-arm-opt
+mkdir build && cd build
+cmake .. -DCMAKE_CXX_COMPILER=clang++-15 -DCMAKE_BUILD_TYPE=Release
+make dnnopt_core -j$(nproc)
+
+# Step 2: Apply BOTH patches to oneDNN v3.7
+cd /path/to/onednn_v3.7
+git apply /path/to/onednn-arm-opt/integration/onednn/onednn_v3.7_dnnopt.patch
+git apply /path/to/onednn-arm-opt/integration/onednn/onednn_v3.7_brgemm_integration.patch
+
+# Step 3: Build oneDNN with DNN-Opt (must use Clang-15)
+mkdir build_patched && cd build_patched
+cmake .. \
+    -DCMAKE_CXX_COMPILER=clang++-15 \
+    -DDNNL_AARCH64_USE_DNNOPT=ON \
+    -DDNNOPT_ROOT=/path/to/onednn-arm-opt \
+    -DDNNL_BUILD_TESTS=ON \
+    -DCMAKE_BUILD_TYPE=Release
+make -j$(nproc)
+make benchdnn -j$(nproc)
+```
+
+#### Verify brgemm integration
+
+```bash
+# 使用 verbose 模式确认 ISA 和 kernel
+DNNL_VERBOSE=1 LD_LIBRARY_PATH=src ./tests/benchdnn/benchdnn \
+    --matmul --mode=P --dt=f32 16x32:32x16 2>&1 | head -15
+
+# 输出解读:
+# - "isa:AArch64 SVE (xxx bits)" → 显示服务器 ISA
+# - "matmul,gemm:jit:f32" → gemm_f32_matmul → DNN-Opt生效
+# - "matmul,brg:sve_512" → brgemm_matmul → 小矩阵自动使用 DNN-Opt
+
+# 检查 dnnopt symbols
+nm src/libdnnl.so.3.7 | grep dnnopt | head -10
+```
+
+#### Files Modified in brgemm integration
+
+| File | Modification |
+|------|--------------|
+| `src/cpu/aarch64/matmul/brgemm_matmul_utils.hpp` | Add `should_use_dnnopt_shape()` and `use_dnnopt` flag |
+| `src/cpu/aarch64/matmul/brgemm_matmul.hpp` | Add `should_use_dnnopt()` and `execute_dnnopt()` methods |
+| `src/cpu/aarch64/matmul/brgemm_matmul.cpp` | Implement DNN-Opt dispatch in `execute_body()` |
+| `cmake/dnnopt.cmake` | Fix library linking configuration |
+
+### Build for v3.7 (basic, without brgemm integration)
 
 **重要**: DNN-Opt 和 oneDNN 必须使用相同的编译器 (Clang-15) 以保证 ABI 兼容。
 
