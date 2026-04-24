@@ -39,6 +39,10 @@ if(DNNOPT_BUILD_TESTS)
     add_executable(bench_fix_verification bench_fix_verification.cpp)
     target_link_libraries(bench_fix_verification PRIVATE dnnopt_core)
 
+    # Shape autotune analysis for special shapes (from shape_rec)
+    add_executable(bench_shape_autotune bench_shape_autotune.cpp)
+    target_link_libraries(bench_shape_autotune PRIVATE dnnopt_core)
+
     # oneDNN comparison tests (optional, requires oneDNN library)
     # Enable with: cmake -DDNNOPT_ENABLE_ONEDNN_TESTS=ON -DDNNOPT_ONEDNN_ROOT=/path/to/onednn
     option(DNNOPT_ENABLE_ONEDNN_TESTS "Enable tests that require oneDNN library" OFF)
