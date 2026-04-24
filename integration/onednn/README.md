@@ -2,6 +2,14 @@
 
 DNN-Opt integrates as a **supplementary patch** for oneDNN via the `dnnl_sgemm` interface.
 
+## DNN-Opt Patches
+
+| Patch File | Description |
+|------------|-------------|
+| `autotune_irregular_m_tile.patch` | Tile selection optimization for irregular M (35, 39, 46) |
+| `onednn_v3.7_dnnopt.patch` | oneDNN v3.7 basic integration |
+| `onednn_v3.7_brgemm_integration.patch` | oneDNN v3.7 brgemm hybrid dispatch |
+
 ## Supported oneDNN Versions
 
 | Version | Patch File | Status |
