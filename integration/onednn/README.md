@@ -14,10 +14,42 @@ DNN-Opt integrates as a **supplementary patch** for oneDNN via the `dnnl_sgemm` 
 
 | Version | Patch File | Status |
 |---------|------------|--------|
-| **v3.7 + brgemm** | `onednn_v3.7_brgemm_integration.patch` | ✅ Tested (SVE_512/256) |
+| **v3.7 + brgemm** | `onednn_v3.7_brgemm_integration.patch` | ⚠️ Tested (stride bug found) |
 | **v3.7** | `onednn_v3.7_dnnopt.patch` | ✅ Tested |
 | **v3.4** | `onednn_v3.4_dnnopt.patch` | ✅ Tested |
 | v3.x (upstream) | `0001-dnnopt-integration.patch` | ✅ Tested |
+
+## benchdnn Performance Test (2026-04-25)
+
+**Platform**: ARM Neoverse N2 (SVE 128 bits)
+
+### Successful Shapes
+
+| Shape (M,N,K) | Baseline GFLOPS | Patched GFLOPS | Speedup |
+|---------------|-----------------|----------------|---------|
+| 1,1024,4096 | 2.86 | 7.50 | **2.62x** |
+| 3,256,256 | 4.64 | 15.49 | **3.34x** |
+| 35,400,400 | 15.42 | 36.50 | **2.37x** |
+| 39,400,400 | 17.66 | 32.11 | **1.82x** |
+| 46,400,400 | 17.37 | 37.83 | **2.18x** |
+| 1024,1024,1024 | 20.38 | 45.45 | **2.23x** |
+
+**Average speedup**: **2.12x**
+
+### Known Bug (brgemm integration)
+
+**Symptom**: Tall-skinny shapes crash (M=2,4,8,16,32,64,128,256,512 with N=1024,K=4096)
+
+**Root cause**: Stride calculation error in `execute_dnnopt()`:
+```cpp
+// Current (wrong):
+const dim_t lda = bgmmc.A_strides[0] / bgmmc.a_dt_sz;  // = 1 (element stride)
+
+// Fixed:
+const dim_t lda = bgmmc.A_strides[1] / bgmmc.a_dt_sz;  // = K (row stride)
+```
+
+**Fix pending**: Will be resolved in next integration cycle.
 
 ## v3.7 Integration
 
